@@ -21,6 +21,7 @@ export const config = {
   botToken: requireEnv('BOT_TOKEN'),
   reviewChannelId: requireEnv('CHAT_ID'),
   dbPath: process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'bot.db'),
+  port: toNumber(process.env.PORT, 3000),
   initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 10),
   scheduler: {
     scanIntervalMs: toNumber(process.env.REVIEW_SCAN_INTERVAL_MS, 60_000),

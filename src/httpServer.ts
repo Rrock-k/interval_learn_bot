@@ -88,6 +88,10 @@ export const createHttpServer = (
       Readable.fromWeb(tgResponse.body).pipe(res);
     } catch (error) {
       logger.error('Ошибка выдачи медиа', error);
+      if (isFileTooBigError(error)) {
+        res.status(413).json({ error: 'Файл слишком большой для предпросмотра' });
+        return;
+      }
       res.status(500).json({ error: 'Не удалось загрузить медиа' });
     }
   });
@@ -165,4 +169,11 @@ export const createHttpServer = (
   });
 
   return server;
+};
+
+const isFileTooBigError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const response = (error as any).response;
+  if (!response) return false;
+  return response.error_code === 400 && /file is too big/i.test(response.description ?? '');
 };

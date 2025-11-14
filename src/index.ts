@@ -3,11 +3,13 @@ import { CardStore } from './db';
 import { createBot } from './bot';
 import { ReviewScheduler } from './reviewScheduler';
 import { logger } from './logger';
+import { createHttpServer } from './httpServer';
 
 const main = async () => {
   const store = new CardStore(config.dbPath);
   const bot = createBot(store);
   const scheduler = new ReviewScheduler(store, bot);
+  const httpServer = createHttpServer(store, scheduler, bot);
 
   await bot.launch();
   logger.info('Бот запущен и ожидает сообщения');
@@ -22,8 +24,10 @@ const main = async () => {
   const gracefulShutdown = (signal: string) => {
     logger.info(`Получен сигнал ${signal}, завершаем работу...`);
     scheduler.stop();
-    bot.stop(signal);
-    process.exit(0);
+    httpServer.close(() => {
+      bot.stop(signal);
+      process.exit(0);
+    });
   };
 
   process.once('SIGINT', () => {

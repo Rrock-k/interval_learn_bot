@@ -57,12 +57,14 @@ export class ReviewScheduler {
   }
 
   public async triggerImmediate(cardId: string) {
-    const card = this.store.getCardById(cardId);
+    let card = this.store.getCardById(cardId);
     if (card.status === 'pending') {
       throw new Error('Карточка ещё не активирована');
     }
     if (card.status === 'awaiting_grade') {
-      throw new Error('Карточка уже ожидает оценку');
+      await this.cleanupPendingMessage(card);
+      this.store.clearAwaitingGrade(card.id);
+      card = this.store.getCardById(cardId);
     }
     await this.sendCardToChannel(card, 'manual_now');
   }
@@ -72,7 +74,7 @@ export class ReviewScheduler {
       const keyboard = buildGradeKeyboard(card.id);
       let messageId: number;
       let wasCopied = false;
-      if (!card.baseChannelMessageId) {
+      const copyOriginal = async () => {
         const response = await this.bot.telegram.copyMessage(
           config.reviewChannelId,
           card.sourceChatId,
@@ -81,22 +83,46 @@ export class ReviewScheduler {
             reply_markup: keyboard.reply_markup,
           },
         );
-        messageId = response.message_id;
+        card.baseChannelMessageId = response.message_id;
+        this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId);
+        return response.message_id;
+      };
+
+      if (!card.baseChannelMessageId) {
+        messageId = await copyOriginal();
         wasCopied = true;
-        this.store.ensureBaseChannelMessage(card.id, messageId);
       } else {
-        const reminder = await this.bot.telegram.sendMessage(
-          config.reviewChannelId,
-          '🔔 Время повторить запись',
-          {
-            reply_markup: keyboard.reply_markup,
-            reply_parameters: {
-              message_id: card.baseChannelMessageId,
-              allow_sending_without_reply: true,
+        try {
+          const reminder = await this.bot.telegram.sendMessage(
+            config.reviewChannelId,
+            '🔔 Время повторить запись',
+            {
+              reply_markup: keyboard.reply_markup,
+              reply_parameters: {
+                message_id: card.baseChannelMessageId,
+                allow_sending_without_reply: true,
+              },
             },
-          },
-        );
-        messageId = reminder.message_id;
+          );
+          if (!reminder.reply_to_message) {
+            await this.deleteMessageSafe(reminder.chat.id, reminder.message_id);
+            messageId = await copyOriginal();
+            wasCopied = true;
+          } else {
+            messageId = reminder.message_id;
+          }
+        } catch (err) {
+          if (this.isMissingReplyTarget(err)) {
+            logger.warn(
+              `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
+            );
+            this.store.setBaseChannelMessage(card.id, null);
+            messageId = await copyOriginal();
+            wasCopied = true;
+          } else {
+            throw err;
+          }
+        }
       }
 
       this.store.markAwaitingGrade({
@@ -160,6 +186,38 @@ export class ReviewScheduler {
       } catch (error) {
         logger.error(`Ошибка автооценки карточки ${card.id}`, error);
       }
+    }
+  }
+
+  private async cleanupPendingMessage(card: CardRecord) {
+    if (card.pendingChannelId && card.pendingChannelMessageId) {
+      try {
+        await this.bot.telegram.editMessageReplyMarkup(
+          card.pendingChannelId,
+          card.pendingChannelMessageId,
+          undefined,
+          undefined,
+        );
+      } catch (err) {
+        logger.warn(`Не удалось очистить клавиатуру карточки ${card.id}`, err);
+      }
+    }
+  }
+
+  private isMissingReplyTarget(err: unknown): boolean {
+    if (!(err instanceof Error) || !err.message) {
+      return false;
+    }
+    return /reply message not found|message to reply not found|replied message not found/i.test(
+      err.message,
+    );
+  }
+
+  private async deleteMessageSafe(chatId: string | number, messageId: number) {
+    try {
+      await this.bot.telegram.deleteMessage(chatId, messageId);
+    } catch (err) {
+      logger.warn(`Не удалось удалить временное сообщение ${messageId}`, err);
     }
   }
 }

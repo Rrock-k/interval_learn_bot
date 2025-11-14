@@ -93,6 +93,11 @@
       button.danger {
         background: #d64545;
       }
+      .media-wrapper {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
       .status-tag {
         padding: 2px 6px;
         border-radius: 999px;
@@ -217,14 +222,30 @@
 
       function renderPreview(card) {
         if (card.contentType === 'photo' && card.contentFileId) {
-          return `<img src="/api/cards/${card.id}/media" alt="Фото" class="media-thumb" />`;
+          return `<div class="media-wrapper"><img src="/api/cards/${card.id}/media" alt="Фото" class="media-thumb media-preview" loading="lazy" /></div>`;
         }
         if (card.contentType === 'video' && card.contentFileId) {
-          return `<video src="/api/cards/${card.id}/media" class="media-video" controls preload="metadata"></video>`;
+          return `<div class="media-wrapper"><video src="/api/cards/${card.id}/media" class="media-video media-preview" controls preload="metadata"></video></div>`;
         }
         return `<div class="preview-text">${htmlEscape(card.contentPreview || '—')}</div>`;
       }
-
+      document.addEventListener(
+        'error',
+        (event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLImageElement || target instanceof HTMLVideoElement)) {
+            return;
+          }
+          if (!target.classList.contains('media-preview')) {
+            return;
+          }
+          const wrapper = target.closest('.media-wrapper');
+          if (!wrapper) return;
+          wrapper.innerHTML =
+            '<div class="preview-text">Медиа слишком большое для предпросмотра — откройте сообщение в Telegram.</div>';
+        },
+        true,
+      );
       async function fetchCards() {
         const params = new URLSearchParams();
         if (statusFilter.value) params.set('status', statusFilter.value);

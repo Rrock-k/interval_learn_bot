@@ -20,6 +20,8 @@ const SUPPORTED_CHAT_TYPES = new Set(['private']);
 interface ParsedMessageInfo {
   contentType: string;
   preview: string | null;
+  fileId: string | null;
+  fileUniqueId: string | null;
 }
 
 const isCommandText = (text?: string | null) =>
@@ -27,15 +29,34 @@ const isCommandText = (text?: string | null) =>
 
 const parseMessage = (message: Message): ParsedMessageInfo | null => {
   if ('text' in message && message.text) {
-    return { contentType: 'text', preview: message.text.slice(0, 200) };
+    return {
+      contentType: 'text',
+      preview: message.text.slice(0, 200),
+      fileId: null,
+      fileUniqueId: null,
+    };
   }
   if ('photo' in message && message.photo?.length) {
     const caption = message.caption ?? '';
-    return { contentType: 'photo', preview: caption.slice(0, 200) || '[Фото]' };
+    const sorted = [...message.photo].sort(
+      (a, b) => (a.file_size ?? 0) - (b.file_size ?? 0),
+    );
+    const target = sorted[0]!;
+    return {
+      contentType: 'photo',
+      preview: caption.slice(0, 200) || '[Фото]',
+      fileId: target.file_id,
+      fileUniqueId: target.file_unique_id,
+    };
   }
   if ('video' in message && message.video) {
     const caption = message.caption ?? '';
-    return { contentType: 'video', preview: caption.slice(0, 200) || '[Видео]' };
+    return {
+      contentType: 'video',
+      preview: caption.slice(0, 200) || '[Видео]',
+      fileId: message.video.file_id,
+      fileUniqueId: message.video.file_unique_id,
+    };
   }
   return null;
 };
@@ -111,6 +132,8 @@ export const createBot = (store: CardStore) => {
         sourceMessageId: ctx.message.message_id,
         contentType: parsed.contentType,
         contentPreview: parsed.preview,
+        contentFileId: parsed.fileId,
+        contentFileUniqueId: parsed.fileUniqueId,
       });
     } catch (error) {
       logger.error('Не удалось создать карточку', error);

@@ -203,6 +203,10 @@ export class CardStore {
         content_type, content_preview, content_file_id, content_file_unique_id, status,
         repetition, interval_days, easiness,
         next_review_at,
+        last_reviewed_at,
+        last_grade,
+        pending_channel_id,
+        pending_channel_message_id,
         base_channel_message_id,
         awaiting_grade_since,
         last_notification_at,
@@ -211,19 +215,39 @@ export class CardStore {
         created_at, updated_at
       ) VALUES (
         @id, @userId, @sourceChatId, @sourceMessageId,
-        @contentType, @contentPreview, @contentFileId, @contentFileUniqueId, 'pending',
-        0, 0, 2.5,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        @now, @now
+        @contentType, @contentPreview, @contentFileId, @contentFileUniqueId, @status,
+        @repetition, @intervalDays, @easiness,
+        @nextReviewAt,
+        @lastReviewedAt,
+        @lastGrade,
+        @pendingChannelId,
+        @pendingChannelMessageId,
+        @baseChannelMessageId,
+        @awaitingGradeSince,
+        @lastNotificationAt,
+        @lastNotificationReason,
+        @lastNotificationMessageId,
+        @createdAt, @updatedAt
       )
     `);
     stmt.run({
       ...input,
-      now,
+      status: 'pending',
+      repetition: 0,
+      intervalDays: 0,
+      easiness: 2.5,
+      nextReviewAt: null,
+      lastReviewedAt: null,
+      lastGrade: null,
+      pendingChannelId: null,
+      pendingChannelMessageId: null,
+      baseChannelMessageId: null,
+      awaitingGradeSince: null,
+      lastNotificationAt: null,
+      lastNotificationReason: null,
+      lastNotificationMessageId: null,
+      createdAt: now,
+      updatedAt: now,
     });
     return this.getCardById(input.id);
   }
@@ -399,16 +423,35 @@ export class CardStore {
       });
   }
 
-  public ensureBaseChannelMessage(cardId: string, messageId: number) {
+  public setBaseChannelMessage(cardId: string, messageId: number | null) {
     this.db
       .prepare(
         `
         UPDATE cards
-        SET base_channel_message_id = COALESCE(base_channel_message_id, @messageId)
+        SET base_channel_message_id = @messageId
         WHERE id = @cardId
       `,
       )
       .run({ cardId, messageId });
+  }
+
+  public clearAwaitingGrade(cardId: string) {
+    this.db
+      .prepare(
+        `
+        UPDATE cards
+        SET status = 'learning',
+            pending_channel_id = NULL,
+            pending_channel_message_id = NULL,
+            awaiting_grade_since = NULL,
+            updated_at = @updatedAt
+        WHERE id = @cardId
+      `,
+      )
+      .run({
+        cardId,
+        updatedAt: new Date().toISOString(),
+      });
   }
 
   public listExpiredAwaitingCards(cutoffIso: string): CardRecord[] {
