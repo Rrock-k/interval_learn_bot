@@ -7,6 +7,6 @@
   "deploy": {
     "healthcheckPath": "/healthz",
     "restartPolicyType": "ALWAYS",
-    "sleepApplication": false
+    "sleepApplication": true
   }
 }
