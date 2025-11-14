@@ -1,7 +1,14 @@
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import dayjs from 'dayjs';
-import express from 'express';
+import express, {
+  type CookieOptions,
+  type NextFunction,
+  type Request,
+  type Response,
+} from 'express';
+import cookieParser from 'cookie-parser';
 import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
 import { CardStatus, CardStore } from './db';
@@ -10,6 +17,8 @@ import { logger } from './logger';
 import { ReviewScheduler } from './reviewScheduler';
 
 const publicDir = path.join(process.cwd(), 'public');
+const DASHBOARD_SESSION_COOKIE = 'dashboard_session';
+const DASHBOARD_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 дней
 
 const allowedStatuses: CardStatus[] = ['pending', 'learning', 'awaiting_grade', 'archived'];
 
@@ -43,13 +52,96 @@ export const createHttpServer = (
   bot: Telegraf,
 ) => {
   const app = express();
+  const activeSessions = new Set<string>();
+  const baseCookieOptions: CookieOptions = {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: process.env.NODE_ENV === 'production',
+  };
+  const sessionCookieOptions: CookieOptions = {
+    ...baseCookieOptions,
+    maxAge: DASHBOARD_SESSION_DURATION_MS,
+  };
+  const expectedSecretHash = hashSecret(config.dashboardSecret);
 
+  const getSessionToken = (req: Request): string | undefined => {
+    const token = req.cookies?.[DASHBOARD_SESSION_COOKIE];
+    return typeof token === 'string' ? token : undefined;
+  };
+
+  const isAuthenticated = (req: Request): boolean => {
+    const token = getSessionToken(req);
+    return Boolean(token && activeSessions.has(token));
+  };
+
+  const requireDashboardAuth = (req: Request, res: Response, next: NextFunction) => {
+    if (isAuthenticated(req)) {
+      next();
+      return;
+    }
+
+    if (req.accepts('html')) {
+      const loginUrl = `/login?next=${encodeURIComponent(req.originalUrl ?? '/')}`;
+      res.redirect(loginUrl);
+      return;
+    }
+    res.status(401).json({ error: 'Необходима авторизация' });
+  };
+
+  app.use(cookieParser());
   app.use(express.json());
-  app.use(express.static(publicDir));
+  app.use(express.urlencoded({ extended: false }));
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, timestamp: new Date().toISOString() });
   });
+
+  app.get('/login', (req, res) => {
+    const nextPath = resolveNextPath(req.query.next);
+    if (isAuthenticated(req)) {
+      res.redirect(nextPath ?? '/');
+      return;
+    }
+    const options: LoginPageOptions = nextPath ? { next: nextPath } : {};
+    res.send(renderLoginPage(options));
+  });
+
+  app.post('/login', (req, res) => {
+    const providedSecret = typeof req.body?.secret === 'string' ? req.body.secret : '';
+    const nextPath =
+      resolveNextPath(req.body?.next) ?? resolveNextPath(req.query.next) ?? undefined;
+
+    if (!providedSecret) {
+      const options: LoginPageOptions = nextPath ? { next: nextPath } : {};
+      options.error = 'Секрет обязателен';
+      res.status(400).send(renderLoginPage(options));
+      return;
+    }
+
+    if (!timingSafeEqual(hashSecret(providedSecret), expectedSecretHash)) {
+      logger.warn('Неудачная попытка входа в панель управления');
+      const options: LoginPageOptions = nextPath ? { next: nextPath } : {};
+      options.error = 'Неверный секрет';
+      res.status(401).send(renderLoginPage(options));
+      return;
+    }
+
+    const sessionToken = randomUUID();
+    activeSessions.add(sessionToken);
+    res.cookie(DASHBOARD_SESSION_COOKIE, sessionToken, sessionCookieOptions);
+    res.redirect(nextPath ?? '/');
+  });
+
+  app.post('/logout', (req, res) => {
+    const token = getSessionToken(req);
+    if (token) {
+      activeSessions.delete(token);
+    }
+    res.clearCookie(DASHBOARD_SESSION_COOKIE, baseCookieOptions);
+    res.redirect('/login');
+  });
+
+  app.use(requireDashboardAuth);
 
   app.get('/api/cards', (req, res) => {
     const status = req.query.status as CardStatus | undefined;
@@ -160,6 +252,8 @@ export const createHttpServer = (
     }
   });
 
+  app.use(express.static(publicDir));
+
   app.get('/', (_req, res) => {
     res.sendFile(path.join(publicDir, 'dashboard.html'));
   });
@@ -169,6 +263,73 @@ export const createHttpServer = (
   });
 
   return server;
+};
+
+const resolveNextPath = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  if (!value.startsWith('/') || value.startsWith('//')) {
+    return undefined;
+  }
+  return value;
+};
+
+type LoginPageOptions = {
+  error?: string;
+  next?: string;
+};
+
+const renderLoginPage = (options: LoginPageOptions = {}) => {
+  const errorMessage = options.error
+    ? `<p class="error">${escapeHtml(options.error)}</p>`
+    : '';
+  const nextField = options.next
+    ? `<input type="hidden" name="next" value="${escapeHtml(options.next)}" />`
+    : '';
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Вход в панель</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+      .card { background: #1e293b; padding: 32px; border-radius: 12px; width: 320px; box-shadow: 0 10px 40px rgba(15, 23, 42, 0.4); }
+      h1 { font-size: 20px; margin: 0 0 16px; text-align: center; }
+      label { font-size: 14px; display: block; margin-bottom: 8px; color: #cbd5f5; }
+      input[type="password"] { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #f8fafc; font-size: 16px; margin-bottom: 16px; }
+      button { width: 100%; padding: 10px 12px; border-radius: 8px; border: none; font-size: 16px; font-weight: 600; background: #38bdf8; color: #0f172a; cursor: pointer; }
+      button:hover { background: #0ea5e9; }
+      .error { color: #f87171; margin-bottom: 12px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Доступ к панели</h1>
+      ${errorMessage}
+      <form method="post" action="/login">
+        ${nextField}
+        <label for="secret">Секрет</label>
+        <input id="secret" autofocus name="secret" type="password" placeholder="••••••••" />
+        <button type="submit">Войти</button>
+      </form>
+    </div>
+  </body>
+</html>`;
+};
+
+const escapeHtml = (value: string): string => {
+  const map: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  return value.replace(/[&<>"']/g, (char) => map[char] ?? char);
+};
+
+const hashSecret = (value: string): Buffer => {
+  return createHash('sha256').update(value).digest();
 };
 
 const isFileTooBigError = (error: unknown): boolean => {

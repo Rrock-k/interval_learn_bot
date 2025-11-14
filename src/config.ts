@@ -23,6 +23,7 @@ export const config = {
   dbPath: process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'bot.db'),
   port: toNumber(process.env.PORT, 3000),
   initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 10),
+  dashboardSecret: requireEnv('DASHBOARD_SECRET'),
   scheduler: {
     scanIntervalMs: toNumber(process.env.REVIEW_SCAN_INTERVAL_MS, 60_000),
     batchSize: toNumber(process.env.REVIEW_BATCH_SIZE, 5),
