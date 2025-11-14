@@ -6,7 +6,8 @@ import { logger } from './logger';
 import { createHttpServer } from './httpServer';
 
 const main = async () => {
-  const store = new CardStore(config.dbPath);
+  const store = new CardStore(config.databaseUrl);
+  await store.init();
   const bot = createBot(store);
   const scheduler = new ReviewScheduler(store, bot);
   const httpServer = createHttpServer(store, scheduler, bot);
@@ -26,7 +27,12 @@ const main = async () => {
     scheduler.stop();
     httpServer.close(() => {
       bot.stop(signal);
-      process.exit(0);
+      store
+        .close()
+        .catch((error) => {
+          logger.error('Ошибка при закрытии подключения к БД', error);
+        })
+        .finally(() => process.exit(0));
     });
   };
 

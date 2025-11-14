@@ -1,6 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import Database from 'better-sqlite3';
+import { Pool, PoolConfig } from 'pg';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 export type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override';
@@ -76,27 +74,22 @@ export interface RecordNotificationInput {
   sentAt: string;
 }
 
-const ensureDirectory = (filePath: string) => {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-};
-
 const rowToCard = (row: any): CardRecord => ({
   id: row.id,
   userId: row.user_id,
   sourceChatId: row.source_chat_id,
-  sourceMessageId: row.source_message_id,
+  sourceMessageId: Number(row.source_message_id),
   contentType: row.content_type,
   contentPreview: row.content_preview,
   contentFileId: row.content_file_id,
   contentFileUniqueId: row.content_file_unique_id,
   status: row.status as CardStatus,
-  repetition: row.repetition,
-  interval: row.interval_days,
-  easiness: row.easiness,
+  repetition: Number(row.repetition),
+  interval: Number(row.interval_days),
+  easiness: Number(row.easiness),
   nextReviewAt: row.next_review_at,
   lastReviewedAt: row.last_reviewed_at,
-  lastGrade: row.last_grade,
+  lastGrade: row.last_grade === null ? null : Number(row.last_grade),
   pendingChannelId: row.pending_channel_id,
   pendingChannelMessageId: row.pending_channel_message_id,
   baseChannelMessageId: row.base_channel_message_id,
@@ -108,19 +101,27 @@ const rowToCard = (row: any): CardRecord => ({
   updatedAt: row.updated_at,
 });
 
-export class CardStore {
-  private db: Database.Database;
+const buildPoolConfig = (connectionString: string): PoolConfig => {
+  const sslRequired =
+    process.env.PGSSLMODE === 'require' ||
+    process.env.POSTGRES_SSL === 'require' ||
+    process.env.NODE_ENV === 'production';
+  return {
+    connectionString,
+    ssl: sslRequired ? { rejectUnauthorized: false } : undefined,
+    max: Number(process.env.PGPOOL_MAX ?? 10),
+  };
+};
 
-  constructor(dbPath: string) {
-    ensureDirectory(dbPath);
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.prepareSchema();
+export class CardStore {
+  private pool: Pool;
+
+  constructor(connectionString: string) {
+    this.pool = new Pool(buildPoolConfig(connectionString));
   }
 
-  private prepareSchema() {
-    const createSql = `
+  async init() {
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS cards (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -146,58 +147,46 @@ export class CardStore {
         last_notification_message_id INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
-      );
+      )
+    `);
+
+    await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_cards_status_next_review
-        ON cards(status, next_review_at);
-    `;
-    this.db.exec(createSql);
+        ON cards(status, next_review_at)
+    `);
 
-    const columns = this.db
-      .prepare(`PRAGMA table_info(cards)`)
-      .all()
-      .map((row: any) => row.name as string);
-
-    const ensureColumn = (name: string, ddl: string) => {
-      if (!columns.includes(name)) {
-        this.db.prepare(ddl).run();
-      }
-    };
-
-    ensureColumn('content_file_id', 'ALTER TABLE cards ADD COLUMN content_file_id TEXT');
-    ensureColumn(
-      'content_file_unique_id',
-      'ALTER TABLE cards ADD COLUMN content_file_unique_id TEXT',
-    );
-    ensureColumn(
-      'base_channel_message_id',
-      'ALTER TABLE cards ADD COLUMN base_channel_message_id INTEGER',
-    );
-    ensureColumn(
-      'awaiting_grade_since',
-      'ALTER TABLE cards ADD COLUMN awaiting_grade_since TEXT',
-    );
-    ensureColumn(
-      'last_notification_at',
-      'ALTER TABLE cards ADD COLUMN last_notification_at TEXT',
-    );
-    ensureColumn(
-      'last_notification_reason',
-      'ALTER TABLE cards ADD COLUMN last_notification_reason TEXT',
-    );
-    ensureColumn(
-      'last_notification_message_id',
-      'ALTER TABLE cards ADD COLUMN last_notification_message_id INTEGER',
-    );
-
-    this.db.exec(`
+    await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_cards_status_awaiting_since
-        ON cards(status, awaiting_grade_since);
+        ON cards(status, awaiting_grade_since)
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS content_file_id TEXT
+    `);
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS content_file_unique_id TEXT
+    `);
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS base_channel_message_id INTEGER
+    `);
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS awaiting_grade_since TEXT
+    `);
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS last_notification_at TEXT
+    `);
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS last_notification_reason TEXT
+    `);
+    await this.pool.query(`
+      ALTER TABLE cards ADD COLUMN IF NOT EXISTS last_notification_message_id INTEGER
     `);
   }
 
-  public createPendingCard(input: CreatePendingCardInput): CardRecord {
+  async createPendingCard(input: CreatePendingCardInput): Promise<CardRecord> {
     const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
+    const { rows } = await this.pool.query(
+      `
       INSERT INTO cards (
         id, user_id, source_chat_id, source_message_id,
         content_type, content_preview, content_file_id, content_file_unique_id, status,
@@ -214,284 +203,254 @@ export class CardStore {
         last_notification_message_id,
         created_at, updated_at
       ) VALUES (
-        @id, @userId, @sourceChatId, @sourceMessageId,
-        @contentType, @contentPreview, @contentFileId, @contentFileUniqueId, @status,
-        @repetition, @intervalDays, @easiness,
-        @nextReviewAt,
-        @lastReviewedAt,
-        @lastGrade,
-        @pendingChannelId,
-        @pendingChannelMessageId,
-        @baseChannelMessageId,
-        @awaitingGradeSince,
-        @lastNotificationAt,
-        @lastNotificationReason,
-        @lastNotificationMessageId,
-        @createdAt, @updatedAt
+        $1, $2, $3, $4,
+        $5, $6, $7, $8, 'pending',
+        0, 0, 2.5,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        $9, $9
       )
-    `);
-    stmt.run({
-      ...input,
-      status: 'pending',
-      repetition: 0,
-      intervalDays: 0,
-      easiness: 2.5,
-      nextReviewAt: null,
-      lastReviewedAt: null,
-      lastGrade: null,
-      pendingChannelId: null,
-      pendingChannelMessageId: null,
-      baseChannelMessageId: null,
-      awaitingGradeSince: null,
-      lastNotificationAt: null,
-      lastNotificationReason: null,
-      lastNotificationMessageId: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    return this.getCardById(input.id);
+      RETURNING *
+    `,
+      [
+        input.id,
+        input.userId,
+        input.sourceChatId,
+        input.sourceMessageId,
+        input.contentType,
+        input.contentPreview,
+        input.contentFileId,
+        input.contentFileUniqueId,
+        now,
+      ],
+    );
+    return rowToCard(rows[0]);
   }
 
-  public deleteCard(id: string) {
-    this.db.prepare(`DELETE FROM cards WHERE id = ?`).run(id);
+  async deleteCard(id: string): Promise<void> {
+    await this.pool.query(`DELETE FROM cards WHERE id = $1`, [id]);
   }
 
-  public getCardById(id: string): CardRecord {
-    const row = this.db.prepare(`SELECT * FROM cards WHERE id = ?`).get(id);
-    if (!row) {
+  async getCardById(id: string): Promise<CardRecord> {
+    const { rows } = await this.pool.query(`SELECT * FROM cards WHERE id = $1`, [id]);
+    if (!rows.length) {
       throw new Error(`Card ${id} not found`);
     }
-    return rowToCard(row);
+    return rowToCard(rows[0]);
   }
 
-  public activateCard(id: string, input: ActivateCardInput): CardRecord {
+  async activateCard(id: string, input: ActivateCardInput): Promise<CardRecord> {
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `
-        UPDATE cards
-        SET status = 'learning',
-            next_review_at = @nextReviewAt,
-            updated_at = @updatedAt
-        WHERE id = @id
-      `,
-      )
-      .run({ id, nextReviewAt: input.nextReviewAt, updatedAt: now });
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET status = 'learning',
+          next_review_at = $1,
+          updated_at = $2
+      WHERE id = $3
+    `,
+      [input.nextReviewAt, now, id],
+    );
     return this.getCardById(id);
   }
 
-  public listDueCards(limit: number): CardRecord[] {
-    const rows = this.db
-      .prepare(
-        `
-        SELECT *
-        FROM cards
-        WHERE status = 'learning'
-          AND next_review_at IS NOT NULL
-          AND next_review_at <= @now
-        ORDER BY next_review_at ASC
-        LIMIT @limit
-      `,
-      )
-      .all({ now: new Date().toISOString(), limit });
+  async listDueCards(limit: number): Promise<CardRecord[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM cards
+      WHERE status = 'learning'
+        AND next_review_at IS NOT NULL
+        AND next_review_at <= $1
+      ORDER BY next_review_at ASC
+      LIMIT $2
+    `,
+      [new Date().toISOString(), limit],
+    );
     return rows.map(rowToCard);
   }
 
-  public listCards(params: ListCardsParams = {}): CardRecord[] {
+  async listCards(params: ListCardsParams = {}): Promise<CardRecord[]> {
     const limit = params.limit ?? 100;
     if (params.status) {
-      const rows = this.db
-        .prepare(
-          `
-          SELECT *
-          FROM cards
-          WHERE status = @status
-          ORDER BY updated_at DESC
-          LIMIT @limit
-        `,
-        )
-        .all({ status: params.status, limit });
-      return rows.map(rowToCard);
-    }
-    const rows = this.db
-      .prepare(
+      const { rows } = await this.pool.query(
         `
         SELECT *
         FROM cards
+        WHERE status = $1
         ORDER BY updated_at DESC
-        LIMIT @limit
+        LIMIT $2
       `,
-      )
-      .all({ limit });
+        [params.status, limit],
+      );
+      return rows.map(rowToCard);
+    }
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM cards
+      ORDER BY updated_at DESC
+      LIMIT $1
+    `,
+      [limit],
+    );
     return rows.map(rowToCard);
   }
 
-  public markAwaitingGrade(input: AwaitingGradeInput) {
-    const stmt = this.db.prepare(
+  async markAwaitingGrade(input: AwaitingGradeInput): Promise<void> {
+    await this.pool.query(
       `
       UPDATE cards
       SET status = 'awaiting_grade',
-          pending_channel_id = @channelId,
-          pending_channel_message_id = @channelMessageId,
-          awaiting_grade_since = @pendingSince,
-          updated_at = @updatedAt
-      WHERE id = @cardId
+          pending_channel_id = $1,
+          pending_channel_message_id = $2,
+          awaiting_grade_since = $3,
+          updated_at = $3
+      WHERE id = $4
     `,
+      [input.channelId, input.channelMessageId, input.pendingSince, input.cardId],
     );
-    stmt.run({
-      cardId: input.cardId,
-      channelId: input.channelId,
-      channelMessageId: input.channelMessageId,
-      pendingSince: input.pendingSince,
-      updatedAt: input.pendingSince,
-    });
   }
 
-  public findAwaitingCard(cardId: string): CardRecord | null {
-    const row = this.db
-      .prepare(`SELECT * FROM cards WHERE id = ? AND status = 'awaiting_grade'`)
-      .get(cardId);
-    return row ? rowToCard(row) : null;
+  async findAwaitingCard(cardId: string): Promise<CardRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM cards WHERE id = $1 AND status = 'awaiting_grade'`,
+      [cardId],
+    );
+    return rows.length ? rowToCard(rows[0]) : null;
   }
 
-  public saveReviewResult(input: ReviewResultInput) {
-    const stmt = this.db.prepare(
+  async saveReviewResult(input: ReviewResultInput): Promise<void> {
+    await this.pool.query(
       `
       UPDATE cards
       SET status = 'learning',
-          last_reviewed_at = @reviewedAt,
-          last_grade = @grade,
-          repetition = @repetition,
-          interval_days = @interval,
-          easiness = @easiness,
-          next_review_at = @nextReviewAt,
+          last_reviewed_at = $1,
+          last_grade = $2,
+          repetition = $3,
+          interval_days = $4,
+          easiness = $5,
+          next_review_at = $6,
           pending_channel_id = NULL,
           pending_channel_message_id = NULL,
           awaiting_grade_since = NULL,
-          updated_at = @reviewedAt
-      WHERE id = @cardId
+          updated_at = $1
+      WHERE id = $7
     `,
+      [
+        input.reviewedAt,
+        input.grade,
+        input.repetition,
+        input.interval,
+        input.easiness,
+        input.nextReviewAt,
+        input.cardId,
+      ],
     );
-    stmt.run({
-      cardId: input.cardId,
-      grade: input.grade,
-      repetition: input.repetition,
-      interval: input.interval,
-      easiness: input.easiness,
-      nextReviewAt: input.nextReviewAt,
-      reviewedAt: input.reviewedAt,
-    });
   }
 
-  public rescheduleCard(cardId: string, nextReviewAt: string) {
-    this.db
-      .prepare(
-        `
-        UPDATE cards
+  async rescheduleCard(cardId: string, nextReviewAt: string): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE cards
       SET status = 'learning',
-          next_review_at = @nextReviewAt,
+          next_review_at = $1,
           pending_channel_id = NULL,
           pending_channel_message_id = NULL,
           awaiting_grade_since = NULL,
-          updated_at = @updatedAt
-      WHERE id = @cardId
-      `,
-      )
-      .run({
-        cardId,
-        nextReviewAt,
-        updatedAt: new Date().toISOString(),
-      });
+          updated_at = $2
+      WHERE id = $3
+    `,
+      [nextReviewAt, new Date().toISOString(), cardId],
+    );
   }
 
-  public recordNotification(input: RecordNotificationInput) {
-    this.db
-      .prepare(
-        `
-        UPDATE cards
-        SET last_notification_at = @sentAt,
-            last_notification_reason = @reason,
-            last_notification_message_id = @messageId
-        WHERE id = @cardId
-      `,
-      )
-      .run({
-        cardId: input.cardId,
-        messageId: input.messageId,
-        reason: input.reason,
-        sentAt: input.sentAt,
-      });
+  async recordNotification(input: RecordNotificationInput): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET last_notification_at = $1,
+          last_notification_reason = $2,
+          last_notification_message_id = $3
+      WHERE id = $4
+    `,
+      [input.sentAt, input.reason, input.messageId, input.cardId],
+    );
   }
 
-  public setBaseChannelMessage(cardId: string, messageId: number | null) {
-    this.db
-      .prepare(
-        `
-        UPDATE cards
-        SET base_channel_message_id = @messageId
-        WHERE id = @cardId
-      `,
-      )
-      .run({ cardId, messageId });
+  async setBaseChannelMessage(cardId: string, messageId: number | null): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET base_channel_message_id = $1
+      WHERE id = $2
+    `,
+      [messageId, cardId],
+    );
   }
 
-  public clearAwaitingGrade(cardId: string) {
-    this.db
-      .prepare(
-        `
-        UPDATE cards
-        SET status = 'learning',
-            pending_channel_id = NULL,
-            pending_channel_message_id = NULL,
-            awaiting_grade_since = NULL,
-            updated_at = @updatedAt
-        WHERE id = @cardId
-      `,
-      )
-      .run({
-        cardId,
-        updatedAt: new Date().toISOString(),
-      });
+  async clearAwaitingGrade(cardId: string): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET status = 'learning',
+          pending_channel_id = NULL,
+          pending_channel_message_id = NULL,
+          awaiting_grade_since = NULL,
+          updated_at = $1
+      WHERE id = $2
+    `,
+      [new Date().toISOString(), cardId],
+    );
   }
 
-  public listExpiredAwaitingCards(cutoffIso: string): CardRecord[] {
-    const rows = this.db
-      .prepare(
-        `
-        SELECT *
-        FROM cards
-        WHERE status = 'awaiting_grade'
-          AND awaiting_grade_since IS NOT NULL
-          AND awaiting_grade_since <= @cutoff
-      `,
-      )
-      .all({ cutoff: cutoffIso });
+  async listExpiredAwaitingCards(cutoffIso: string): Promise<CardRecord[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM cards
+      WHERE status = 'awaiting_grade'
+        AND awaiting_grade_since IS NOT NULL
+        AND awaiting_grade_since <= $1
+    `,
+      [cutoffIso],
+    );
     return rows.map(rowToCard);
   }
 
-  public overrideNextReview(cardId: string, isoDate: string) {
-    this.db
-      .prepare(
-        `
-        UPDATE cards
-        SET next_review_at = @isoDate,
-            updated_at = @isoDate
-        WHERE id = @cardId
-      `,
-      )
-      .run({ cardId, isoDate });
+  async overrideNextReview(cardId: string, isoDate: string): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET next_review_at = $1,
+          updated_at = $1
+      WHERE id = $2
+    `,
+      [isoDate, cardId],
+    );
   }
 
-  public updateStatus(cardId: string, status: CardStatus) {
-    this.db
-      .prepare(
-        `
-        UPDATE cards
-        SET status = @status,
-            updated_at = @updatedAt
-        WHERE id = @cardId
-      `,
-      )
-      .run({ cardId, status, updatedAt: new Date().toISOString() });
+  async updateStatus(cardId: string, status: CardStatus): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET status = $1,
+          updated_at = $2
+      WHERE id = $3
+    `,
+      [status, new Date().toISOString(), cardId],
+    );
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end();
   }
 }

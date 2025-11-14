@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
 
 loadEnv();
@@ -20,7 +19,7 @@ const toNumber = (value: string | undefined, fallback: number): number => {
 export const config = {
   botToken: requireEnv('BOT_TOKEN'),
   reviewChannelId: requireEnv('CHAT_ID'),
-  dbPath: process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'bot.db'),
+  databaseUrl: requireEnv('DATABASE_URL'),
   port: toNumber(process.env.PORT, 3000),
   initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 10),
   dashboardSecret: requireEnv('DASHBOARD_SECRET'),

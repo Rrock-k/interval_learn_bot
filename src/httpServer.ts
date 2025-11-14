@@ -143,7 +143,7 @@ export const createHttpServer = (
 
   app.use(requireDashboardAuth);
 
-  app.get('/api/cards', (req, res) => {
+  app.get('/api/cards', async (req, res) => {
     const status = req.query.status as CardStatus | undefined;
     const limit = parseLimit(req.query.limit, 100);
     if (status && !allowedStatuses.includes(status)) {
@@ -151,7 +151,7 @@ export const createHttpServer = (
       return;
     }
     try {
-      const cards = store.listCards({ status, limit });
+      const cards = await store.listCards({ status, limit });
       res.json({ data: cards });
     } catch (error) {
       logger.error('Ошибка чтения карточек', error);
@@ -161,7 +161,7 @@ export const createHttpServer = (
 
   app.get('/api/cards/:id/media', async (req, res) => {
     try {
-      const card = store.getCardById(req.params.id);
+      const card = await store.getCardById(req.params.id);
       if (!card.contentFileId) {
         res.status(404).json({ error: 'Нет медиа для этой карточки' });
         return;
@@ -188,11 +188,11 @@ export const createHttpServer = (
     }
   });
 
-  app.post('/api/cards/:id/reschedule', (req, res) => {
+  app.post('/api/cards/:id/reschedule', async (req, res) => {
     const minutes = parseMinutes(req.body?.minutes, 60);
     const nextReviewAt = dayjs().add(Math.max(1, minutes), 'minute').toISOString();
     try {
-      store.rescheduleCard(req.params.id, nextReviewAt);
+      await store.rescheduleCard(req.params.id, nextReviewAt);
       res.json({ ok: true, nextReviewAt });
     } catch (error) {
       logger.error('Ошибка переноса карточки', error);
@@ -212,14 +212,14 @@ export const createHttpServer = (
     }
   });
 
-  app.post('/api/cards/:id/next-review', (req, res) => {
+  app.post('/api/cards/:id/next-review', async (req, res) => {
     const nextReviewAt = req.body?.nextReviewAt;
     if (!isIsoDate(nextReviewAt)) {
       res.status(400).json({ error: 'Некорректная дата' });
       return;
     }
     try {
-      store.overrideNextReview(req.params.id, nextReviewAt);
+      await store.overrideNextReview(req.params.id, nextReviewAt);
       res.json({ ok: true, nextReviewAt });
     } catch (error) {
       logger.error('Ошибка ручного планирования', error);
@@ -227,14 +227,14 @@ export const createHttpServer = (
     }
   });
 
-  app.post('/api/cards/:id/status', (req, res) => {
+  app.post('/api/cards/:id/status', async (req, res) => {
     const status = req.body?.status as CardStatus | undefined;
     if (!status || !allowedStatuses.includes(status)) {
       res.status(400).json({ error: 'Статус обязателен' });
       return;
     }
     try {
-      store.updateStatus(req.params.id, status);
+      await store.updateStatus(req.params.id, status);
       res.json({ ok: true });
     } catch (error) {
       logger.error('Ошибка смены статуса', error);
@@ -242,9 +242,9 @@ export const createHttpServer = (
     }
   });
 
-  app.delete('/api/cards/:id', (req, res) => {
+  app.delete('/api/cards/:id', async (req, res) => {
     try {
-      store.deleteCard(req.params.id);
+      await store.deleteCard(req.params.id);
       res.json({ ok: true });
     } catch (error) {
       logger.error('Ошибка удаления карточки', error);

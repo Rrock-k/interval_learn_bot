@@ -125,7 +125,7 @@ export const createBot = (store: CardStore) => {
 
     const cardId = uuid();
     try {
-      store.createPendingCard({
+      await store.createPendingCard({
         id: cardId,
         userId: `${userId}`,
         sourceChatId: `${ctx.chat.id}`,
@@ -154,13 +154,13 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      const card = store.getCardById(cardId);
+      const card = await store.getCardById(cardId);
       if (card.status !== 'pending') {
         await ctx.answerCbQuery('Эта карточка уже обработана');
         return;
       }
       const nextReviewAt = computeInitialReviewDate(config.initialReviewMinutes);
-      store.activateCard(cardId, { nextReviewAt });
+      await store.activateCard(cardId, { nextReviewAt });
       await ctx.answerCbQuery(
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
       );
@@ -180,12 +180,12 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      const card = store.getCardById(cardId);
+      const card = await store.getCardById(cardId);
       if (card.status !== 'pending') {
         await ctx.answerCbQuery('Уже обработано');
         return;
       }
-      store.deleteCard(cardId);
+      await store.deleteCard(cardId);
       await ctx.answerCbQuery('Удалено');
       await tryRemoveKeyboard(ctx);
     } catch (error) {
@@ -205,14 +205,14 @@ export const createBot = (store: CardStore) => {
         await ctx.answerCbQuery('Некорректное действие');
         return;
       }
-      const card = store.findAwaitingCard(cardId);
+      const card = await store.findAwaitingCard(cardId);
       if (!card) {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
       }
       try {
         const result = computeReview(card, grade);
-        store.saveReviewResult({
+        await store.saveReviewResult({
           cardId,
           grade: result.quality,
           nextReviewAt: result.nextReviewAt,

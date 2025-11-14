@@ -49,7 +49,7 @@ export class ReviewScheduler {
   }
 
   private async tick() {
-    const dueCards = this.store.listDueCards(config.scheduler.batchSize);
+    const dueCards = await this.store.listDueCards(config.scheduler.batchSize);
     for (const card of dueCards) {
       await this.sendCardToChannel(card, 'scheduled');
     }
@@ -57,14 +57,14 @@ export class ReviewScheduler {
   }
 
   public async triggerImmediate(cardId: string) {
-    let card = this.store.getCardById(cardId);
+    let card = await this.store.getCardById(cardId);
     if (card.status === 'pending') {
       throw new Error('Карточка ещё не активирована');
     }
     if (card.status === 'awaiting_grade') {
       await this.cleanupPendingMessage(card);
-      this.store.clearAwaitingGrade(card.id);
-      card = this.store.getCardById(cardId);
+      await this.store.clearAwaitingGrade(card.id);
+      card = await this.store.getCardById(cardId);
     }
     await this.sendCardToChannel(card, 'manual_now');
   }
@@ -84,7 +84,7 @@ export class ReviewScheduler {
           },
         );
         card.baseChannelMessageId = response.message_id;
-        this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId);
+        await this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId);
         return response.message_id;
       };
 
@@ -116,7 +116,7 @@ export class ReviewScheduler {
             logger.warn(
               `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
             );
-            this.store.setBaseChannelMessage(card.id, null);
+            await this.store.setBaseChannelMessage(card.id, null);
             messageId = await copyOriginal();
             wasCopied = true;
           } else {
@@ -125,13 +125,13 @@ export class ReviewScheduler {
         }
       }
 
-      this.store.markAwaitingGrade({
+      await this.store.markAwaitingGrade({
         cardId: card.id,
         channelId: config.reviewChannelId,
         channelMessageId: messageId,
         pendingSince: new Date().toISOString(),
       });
-      this.store.recordNotification({
+      await this.store.recordNotification({
         cardId: card.id,
         messageId,
         reason,
@@ -143,20 +143,20 @@ export class ReviewScheduler {
     } catch (error) {
       logger.error(`Не удалось отправить карточку ${card.id}`, error);
       const retryAt = dayjs().add(1, 'hour').toISOString();
-      this.store.rescheduleCard(card.id, retryAt);
+      await this.store.rescheduleCard(card.id, retryAt);
     }
   }
 
   private async autoGradeExpired() {
     const cutoff = dayjs().subtract(1, 'minute').toISOString();
-    const expired = this.store.listExpiredAwaitingCards(cutoff);
+    const expired = await this.store.listExpiredAwaitingCards(cutoff);
     if (!expired.length) {
       return;
     }
     for (const card of expired) {
       try {
         const result = computeReview(card, DEFAULT_TIMEOUT_GRADE);
-        this.store.saveReviewResult({
+        await this.store.saveReviewResult({
           cardId: card.id,
           grade: result.quality,
           nextReviewAt: result.nextReviewAt,
