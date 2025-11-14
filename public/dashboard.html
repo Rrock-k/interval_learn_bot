@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Interval Learn Bot — база карточек</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background-color: #0b1218;
+        color: #f5f5f5;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #0b1218;
+        color: #f5f5f5;
+      }
+      h1 {
+        margin-bottom: 8px;
+      }
+      .controls {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      label {
+        font-size: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      select,
+      input {
+        padding: 6px 8px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: #111c27;
+        color: inherit;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        border-bottom: 1px solid #1f2a36;
+        padding: 8px;
+        vertical-align: top;
+      }
+      th {
+        text-align: left;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9fb1c7;
+      }
+      tbody tr:hover {
+        background: #101b29;
+      }
+      .media-thumb {
+        max-width: 180px;
+        border-radius: 8px;
+        display: block;
+      }
+      .media-video {
+        max-width: 220px;
+        border-radius: 8px;
+        display: block;
+      }
+      .preview-text {
+        white-space: pre-wrap;
+        font-size: 14px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      button {
+        border: none;
+        border-radius: 4px;
+        padding: 4px 8px;
+        cursor: pointer;
+        background: #1f7aec;
+        color: white;
+      }
+      button.secondary {
+        background: #384c63;
+      }
+      button.danger {
+        background: #d64545;
+      }
+      .status-tag {
+        padding: 2px 6px;
+        border-radius: 999px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      .status-pending {
+        background: #5b44ff33;
+        color: #c2b5ff;
+      }
+      .status-learning {
+        background: #20c99733;
+        color: #9ff2d0;
+      }
+      .status-awaiting_grade {
+        background: #ffb34733;
+        color: #ffd59a;
+      }
+      .status-archived {
+        background: #9ea7b133;
+        color: #cdd3dc;
+      }
+      #toast {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        background: #182330;
+        padding: 12px 16px;
+        border-radius: 8px;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+      }
+      #toast.visible {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Карточки интервального бота</h1>
+    <p>Просмотр и управление базой повторений. Данные обновляются напрямую из SQLite.</p>
+    <div class="controls">
+      <label>
+        Статус
+        <select id="statusFilter">
+          <option value="">Все</option>
+          <option value="pending">pending</option>
+          <option value="learning" selected>learning</option>
+          <option value="awaiting_grade">awaiting_grade</option>
+          <option value="archived">archived</option>
+        </select>
+      </label>
+      <label>
+        Лимит
+        <select id="limitSelect">
+          <option value="20">20</option>
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+        </select>
+      </label>
+      <label>
+        Отложить (мин)
+        <input id="delayMinutes" type="number" min="1" step="5" value="60" />
+      </label>
+      <button id="refreshBtn">Обновить</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Статус</th>
+          <th>След. повтор</th>
+          <th>Превью</th>
+          <th>Действия</th>
+        </tr>
+      </thead>
+      <tbody id="cardsBody"></tbody>
+    </table>
+    <div id="toast"></div>
+    <script>
+      const statusFilter = document.getElementById('statusFilter');
+      const limitSelect = document.getElementById('limitSelect');
+      const delayInput = document.getElementById('delayMinutes');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const cardsBody = document.getElementById('cardsBody');
+      const toast = document.getElementById('toast');
+
+      const statusLabels = {
+        pending: 'pending',
+        learning: 'learning',
+        awaiting_grade: 'awaiting grade',
+        archived: 'archived',
+      };
+
+      function showToast(text) {
+        toast.textContent = text;
+        toast.classList.add('visible');
+        setTimeout(() => toast.classList.remove('visible'), 2400);
+      }
+
+      function formatDate(iso) {
+        if (!iso) return '—';
+        const date = new Date(iso);
+        const diffHours = Math.round((date - Date.now()) / 3600000);
+        return `${date.toLocaleString()} (${diffHours} ч)`;
+      }
+
+      const htmlEscape = (str = '') =>
+        String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+
+      const isoToInputValue = (iso) => {
+        if (!iso) return '';
+        const date = new Date(iso);
+        const pad = (num) => num.toString().padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+          date.getHours(),
+        )}:${pad(date.getMinutes())}`;
+      };
+
+      function renderPreview(card) {
+        if (card.contentType === 'photo' && card.contentFileId) {
+          return `<img src="/api/cards/${card.id}/media" alt="Фото" class="media-thumb" />`;
+        }
+        if (card.contentType === 'video' && card.contentFileId) {
+          return `<video src="/api/cards/${card.id}/media" class="media-video" controls preload="metadata"></video>`;
+        }
+        return `<div class="preview-text">${htmlEscape(card.contentPreview || '—')}</div>`;
+      }
+
+      async function fetchCards() {
+        const params = new URLSearchParams();
+        if (statusFilter.value) params.set('status', statusFilter.value);
+        params.set('limit', limitSelect.value);
+        const res = await fetch(`/api/cards?${params.toString()}`);
+        if (!res.ok) {
+          showToast('Не удалось загрузить карточки');
+          return;
+        }
+        const payload = await res.json();
+        renderCards(payload.data ?? []);
+      }
+
+      function renderCards(cards) {
+        if (!cards.length) {
+          cardsBody.innerHTML = '<tr><td colspan="5">Нет карточек по текущему фильтру.</td></tr>';
+          return;
+        }
+        cardsBody.innerHTML = cards
+          .map(
+            (card) => `
+          <tr data-id="${card.id}" data-next="${card.nextReviewAt ?? ''}">
+            <td>
+              <div>${card.id}</div>
+              <div style="font-size:12px;color:#87a2c2;">Chat ${card.sourceChatId} • Msg ${card.sourceMessageId}</div>
+            </td>
+            <td>
+              <span class="status-tag status-${card.status}">${statusLabels[card.status] ?? card.status}</span>
+            </td>
+            <td>${formatDate(card.nextReviewAt)}</td>
+            <td>
+              ${renderPreview(card)}
+              <div style="font-size:12px;color:#7b92ad;margin-top:4px;">
+                Напоминание: ${card.lastNotificationAt ? new Date(card.lastNotificationAt).toLocaleString() : '—'}
+                ${card.lastNotificationReason ? `(${card.lastNotificationReason})` : ''}
+              </div>
+            </td>
+            <td>
+              <div class="actions">
+                <button class="secondary" data-action="status" data-status="archived">В архив</button>
+                <button class="secondary" data-action="force">Напомнить сейчас</button>
+                <button class="secondary" data-action="delay">Отложить</button>
+                <button class="secondary" data-action="override">Дата вручную</button>
+                <button class="danger" data-action="delete">Удалить</button>
+              </div>
+            </td>
+          </tr>
+        `,
+          )
+          .join('');
+      }
+
+      async function performAction(cardId, action, dataset = {}, rowEl) {
+        if (action === 'delete') {
+          if (!confirm('Удалить карточку?')) return;
+          const res = await fetch(`/api/cards/${cardId}`, { method: 'DELETE' });
+          if (res.ok) {
+            showToast('Удалено');
+            fetchCards();
+          } else {
+            showToast('Ошибка удаления');
+          }
+          return;
+        }
+
+        if (action === 'force') {
+          const res = await fetch(`/api/cards/${cardId}/force-review`, { method: 'POST' });
+          const payload = await res.json().catch(() => ({}));
+          showToast(res.ok ? 'Запланировано сейчас' : payload.error || 'Ошибка обновления');
+          if (res.ok) fetchCards();
+          return;
+        }
+
+        if (action === 'delay') {
+          const minutes = Number(delayInput.value) || 60;
+          const res = await fetch(`/api/cards/${cardId}/reschedule`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ minutes }),
+          });
+          showToast(res.ok ? `Отложено на ${minutes} мин` : 'Ошибка переноса');
+          if (res.ok) fetchCards();
+          return;
+        }
+
+        if (action === 'override') {
+          const current = rowEl?.dataset.next
+            ? isoToInputValue(rowEl.dataset.next)
+            : isoToInputValue(new Date().toISOString());
+          const nextValue = prompt(
+            'Введите дату следующего напоминания (формат YYYY-MM-DDTHH:mm)',
+            current,
+          );
+          if (!nextValue) return;
+          const iso = new Date(nextValue).toISOString();
+          if (!iso || Number.isNaN(Date.parse(iso))) {
+            showToast('Некорректная дата');
+            return;
+          }
+          const res = await fetch(`/api/cards/${cardId}/next-review`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nextReviewAt: iso }),
+          });
+          const payload = await res.json().catch(() => ({}));
+          showToast(res.ok ? 'Дата обновлена' : payload.error || 'Ошибка обновления');
+          if (res.ok) fetchCards();
+          return;
+        }
+
+        if (action === 'status') {
+          const status = dataset.status;
+          if (status === 'archived' && !confirm('Отправить карточку в архив?')) {
+            return;
+          }
+          const res = await fetch(`/api/cards/${cardId}/status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status }),
+          });
+          showToast(res.ok ? `Статус: ${status}` : 'Ошибка статуса');
+          if (res.ok) fetchCards();
+        }
+      }
+
+      cardsBody.addEventListener('click', (event) => {
+        const target = event.target.closest('button[data-action]');
+        if (!target) return;
+        const tr = target.closest('tr');
+        if (!tr) return;
+        performAction(tr.dataset.id, target.dataset.action, target.dataset, tr);
+      });
+
+      statusFilter.addEventListener('change', fetchCards);
+      limitSelect.addEventListener('change', fetchCards);
+      refreshBtn.addEventListener('click', fetchCards);
+
+      fetchCards();
+    </script>
+  </body>
+</html>
