@@ -49,17 +49,15 @@ npm start
 - `src/index.ts` — точка входа, связывает бота, БД и планировщик.
 
 ## Railway деплой
-1. Убедитесь, что репозиторий находится на GitHub и содержит этот код.
-2. В [Railway](https://railway.app/) создайте новый проект → Deploy from GitHub repo → выберите репозиторий.
-3. В разделе **Variables** задайте:
-   - `BOT_TOKEN`
-   - `CHAT_ID`
-   - (опционально) `INITIAL_REVIEW_MINUTES`, `REVIEW_SCAN_INTERVAL_MS`, `REVIEW_BATCH_SIZE`
-4. В разделе **Settings → Deployments** убедитесь, что Build Command оставлен по умолчанию (Railway выполнит `npm install && npm run build`). Start Command должен быть `npm run start`.
-5. Добавьте бота админом в нужный канал, чтобы он мог публиковать сообщения.
-6. Перезапустите сервис. Логи доступны в Railway → Logs.
 
-> **Примечание:** Railway сохраняет локальные файлы до следующего деплоя. База `data/bot.db` будет жить в контейнере, но при пересборке контейнера очистится. Для долгосрочного хранения можно позже подключить, например, Railway Postgres.
+В репозитории добавлены `Dockerfile`, `.dockerignore` и `railway.json`, поэтому Railway распознаёт проект как Docker-сервис и запускает `npm ci → npm run build → npm start` внутри контейнера. Краткий план:
+
+1. Опубликуйте репозиторий на GitHub и создайте проект в [Railway](https://railway.app/) → **Deploy from GitHub repo**.
+2. Railway автоматически возьмёт Dockerfile и соберёт образ (это зафиксировано в `railway.json`).
+3. В разделе **Variables** задайте `BOT_TOKEN`, `CHAT_ID`, при необходимости `INITIAL_REVIEW_MINUTES`, `REVIEW_SCAN_INTERVAL_MS`, `REVIEW_BATCH_SIZE` и/или `PORT`.
+4. После первого деплоя проверьте `https://<service>.up.railway.app/healthz` — ответ `{"ok": true, ...}` подтверждает, что бот и планировщик работают.
+
+Полный пошаговый гид со скриншотами CLI-команд находится в `docs/railway-deploy.md`. Там же описаны нюансы хранения SQLite (`/app/data/bot.db`) и сценарии обновлений.
 
 ## Скрипты
 - `npm run dev` — запуск в режиме разработки (hot reload).
@@ -70,3 +68,4 @@ npm start
 ## Дополнительно
 - `docs/clarification-questions.md` — финализированное ТЗ и ответы на вопросы.
 - `docs/hosting-options.md` — сравнительная таблица бесплатных хостингов.
+- `docs/railway-deploy.md` — детальная инструкция по публикации на Railway.
