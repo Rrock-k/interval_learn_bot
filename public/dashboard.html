@@ -138,14 +138,14 @@
   </head>
   <body>
     <h1>Карточки интервального бота</h1>
-    <p>Просмотр и управление базой повторений. Данные обновляются напрямую из SQLite.</p>
+    <p>Просмотр и управление базой повторений. Данные обновляются напрямую из PostgreSQL.</p>
     <div class="controls">
       <label>
         Статус
         <select id="statusFilter">
-          <option value="">Все</option>
+          <option value="" selected>Все</option>
           <option value="pending">pending</option>
-          <option value="learning" selected>learning</option>
+          <option value="learning">learning</option>
           <option value="awaiting_grade">awaiting_grade</option>
           <option value="archived">archived</option>
         </select>
@@ -191,6 +191,12 @@
         awaiting_grade: 'awaiting grade',
         archived: 'archived',
       };
+      const allowedStatusFilters = new Set(Object.keys(statusLabels));
+      const urlParams = new URLSearchParams(window.location.search);
+      const initialStatus = urlParams.get('status');
+      if (initialStatus && allowedStatusFilters.has(initialStatus)) {
+        statusFilter.value = initialStatus;
+      }
 
       function showToast(text) {
         toast.textContent = text;
@@ -298,6 +304,18 @@
           .join('');
       }
 
+      function persistStatusFilter() {
+        const params = new URLSearchParams(window.location.search);
+        if (statusFilter.value) {
+          params.set('status', statusFilter.value);
+        } else {
+          params.delete('status');
+        }
+        const query = params.toString();
+        const newUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+        window.history.replaceState({}, '', newUrl);
+      }
+
       async function performAction(cardId, action, dataset = {}, rowEl) {
         if (action === 'delete') {
           if (!confirm('Удалить карточку?')) return;
@@ -379,7 +397,10 @@
         performAction(tr.dataset.id, target.dataset.action, target.dataset, tr);
       });
 
-      statusFilter.addEventListener('change', fetchCards);
+      statusFilter.addEventListener('change', () => {
+        persistStatusFilter();
+        fetchCards();
+      });
       limitSelect.addEventListener('change', fetchCards);
       refreshBtn.addEventListener('click', fetchCards);
 
