@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import dayjs from 'dayjs';
 import express, {
   type CookieOptions,
@@ -52,7 +52,6 @@ export const createHttpServer = (
   bot: Telegraf,
 ) => {
   const app = express();
-  const activeSessions = new Set<string>();
   const baseCookieOptions: CookieOptions = {
     httpOnly: true,
     sameSite: 'strict',
@@ -71,7 +70,7 @@ export const createHttpServer = (
 
   const isAuthenticated = (req: Request): boolean => {
     const token = getSessionToken(req);
-    return Boolean(token && activeSessions.has(token));
+    return Boolean(token && verifySessionToken(token, expectedSecretHash));
   };
 
   const requireDashboardAuth = (req: Request, res: Response, next: NextFunction) => {
@@ -126,17 +125,12 @@ export const createHttpServer = (
       return;
     }
 
-    const sessionToken = randomUUID();
-    activeSessions.add(sessionToken);
+    const sessionToken = createSessionToken(expectedSecretHash);
     res.cookie(DASHBOARD_SESSION_COOKIE, sessionToken, sessionCookieOptions);
     res.redirect(nextPath ?? '/');
   });
 
   app.post('/logout', (req, res) => {
-    const token = getSessionToken(req);
-    if (token) {
-      activeSessions.delete(token);
-    }
     res.clearCookie(DASHBOARD_SESSION_COOKIE, baseCookieOptions);
     res.redirect('/login');
   });
@@ -330,6 +324,38 @@ const escapeHtml = (value: string): string => {
 
 const hashSecret = (value: string): Buffer => {
   return createHash('sha256').update(value).digest();
+};
+
+const createSessionToken = (secretHash: Buffer): string => {
+  const expiresAt = (Date.now() + DASHBOARD_SESSION_DURATION_MS).toString();
+  const signature = signSessionPayload(expiresAt, secretHash);
+  return `${expiresAt}.${signature}`;
+};
+
+const verifySessionToken = (token: string, secretHash: Buffer): boolean => {
+  const [expiresAtStr, signature] = token.split('.');
+  if (!expiresAtStr || !signature) return false;
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return false;
+  }
+  const expectedSignature = signSessionPayload(expiresAtStr, secretHash);
+  let providedBuffer: Buffer;
+  let expectedBuffer: Buffer;
+  try {
+    providedBuffer = Buffer.from(signature, 'hex');
+    expectedBuffer = Buffer.from(expectedSignature, 'hex');
+  } catch (_error) {
+    return false;
+  }
+  if (providedBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(providedBuffer, expectedBuffer);
+};
+
+const signSessionPayload = (payload: string, secretHash: Buffer): string => {
+  return createHmac('sha256', secretHash).update(payload).digest('hex');
 };
 
 const isFileTooBigError = (error: unknown): boolean => {

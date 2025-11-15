@@ -257,6 +257,7 @@
         if (statusFilter.value) params.set('status', statusFilter.value);
         params.set('limit', limitSelect.value);
         const res = await fetch(`/api/cards?${params.toString()}`);
+        if (!ensureAuthorized(res)) return;
         if (!res.ok) {
           showToast('Не удалось загрузить карточки');
           return;
@@ -320,6 +321,7 @@
         if (action === 'delete') {
           if (!confirm('Удалить карточку?')) return;
           const res = await fetch(`/api/cards/${cardId}`, { method: 'DELETE' });
+          if (!ensureAuthorized(res)) return;
           if (res.ok) {
             showToast('Удалено');
             fetchCards();
@@ -331,6 +333,7 @@
 
         if (action === 'force') {
           const res = await fetch(`/api/cards/${cardId}/force-review`, { method: 'POST' });
+          if (!ensureAuthorized(res)) return;
           const payload = await res.json().catch(() => ({}));
           showToast(res.ok ? 'Запланировано сейчас' : payload.error || 'Ошибка обновления');
           if (res.ok) fetchCards();
@@ -344,6 +347,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ minutes }),
           });
+          if (!ensureAuthorized(res)) return;
           showToast(res.ok ? `Отложено на ${minutes} мин` : 'Ошибка переноса');
           if (res.ok) fetchCards();
           return;
@@ -368,6 +372,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ nextReviewAt: iso }),
           });
+          if (!ensureAuthorized(res)) return;
           const payload = await res.json().catch(() => ({}));
           showToast(res.ok ? 'Дата обновлена' : payload.error || 'Ошибка обновления');
           if (res.ok) fetchCards();
@@ -384,6 +389,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status }),
           });
+          if (!ensureAuthorized(res)) return;
           showToast(res.ok ? `Статус: ${status}` : 'Ошибка статуса');
           if (res.ok) fetchCards();
         }
@@ -405,6 +411,19 @@
       refreshBtn.addEventListener('click', fetchCards);
 
       fetchCards();
+
+      const redirectToLogin = () => {
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.href = `/login?next=${encodeURIComponent(next || '/')}`;
+      };
+
+      const ensureAuthorized = (response) => {
+        if (response.status === 401) {
+          redirectToLogin();
+          return false;
+        }
+        return true;
+      };
     </script>
   </body>
 </html>
