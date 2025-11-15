@@ -12,6 +12,8 @@ const main = async () => {
   const scheduler = new ReviewScheduler(store, bot);
   const httpServer = createHttpServer(store, scheduler, bot);
 
+  logger.info('Перед запуском бота')
+  
   await bot.launch();
   logger.info('Бот запущен и ожидает сообщения');
 
