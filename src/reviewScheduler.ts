@@ -2,7 +2,7 @@ import dayjs from 'dayjs';
 import { Markup, Telegraf } from 'telegraf';
 import { CardRecord, CardStore, NotificationReason } from './db';
 import { config } from './config';
-import { computeReview, gradeOptions, GradeKey } from './spacedRepetition';
+import { gradeOptions } from './spacedRepetition';
 import { logger } from './logger';
 import { withDbRetry } from './utils/dbRetry';
 
@@ -15,8 +15,6 @@ const buildGradeKeyboard = (cardId: string) =>
       ),
     ),
   ]);
-
-const DEFAULT_TIMEOUT_GRADE: GradeKey = 'again';
 
 export class ReviewScheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -62,7 +60,7 @@ export class ReviewScheduler {
       }
       await this.sendCardToChannel(current, 'scheduled');
     }
-    await this.autoGradeExpired();
+    await this.recoverExpiredAwaiting();
   }
 
   public async triggerImmediate(cardId: string) {
@@ -162,8 +160,9 @@ export class ReviewScheduler {
     }
   }
 
-  private async autoGradeExpired() {
-    const cutoff = dayjs().subtract(1, 'minute').toISOString();
+  private async recoverExpiredAwaiting() {
+    const timeoutMs = config.scheduler.awaitingGradeTimeoutMs;
+    const cutoff = dayjs().subtract(timeoutMs, 'millisecond').toISOString();
     const expired = await withDbRetry(() =>
       this.store.listExpiredAwaitingCards(cutoff),
     );
@@ -172,38 +171,15 @@ export class ReviewScheduler {
     }
     for (const card of expired) {
       try {
-        const result = computeReview(card, DEFAULT_TIMEOUT_GRADE);
-        await withDbRetry(() =>
-          this.store.saveReviewResult({
-            cardId: card.id,
-            grade: result.quality,
-            nextReviewAt: result.nextReviewAt,
-            repetition: result.repetition,
-            interval: result.interval,
-            easiness: result.easiness,
-            reviewedAt: new Date().toISOString(),
-          }),
-        );
-        if (card.pendingChannelId && card.pendingChannelMessageId) {
-          try {
-            await this.bot.telegram.editMessageReplyMarkup(
-              card.pendingChannelId,
-              card.pendingChannelMessageId,
-              undefined,
-              undefined,
-            );
-          } catch (err) {
-            logger.warn(
-              `Не удалось убрать клавиатуру по таймауту для карточки ${card.id}`,
-              err,
-            );
-          }
-        }
+        await this.cleanupPendingMessage(card);
+        await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
         logger.info(
-          `Карточка ${card.id} автоматически оценена как ${DEFAULT_TIMEOUT_GRADE} после таймаута`,
+          `Карточка ${card.id} возвращена в статус learning после ${Math.round(
+            timeoutMs / 1000,
+          )} секунд ожидания оценки`,
         );
       } catch (error) {
-        logger.error(`Ошибка автооценки карточки ${card.id}`, error);
+        logger.error(`Ошибка возврата карточки ${card.id} после таймаута`, error);
       }
     }
   }
