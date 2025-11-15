@@ -51,6 +51,9 @@ export class ReviewScheduler {
 
   private async tick() {
     const dueCards = await this.store.listDueCards(config.scheduler.batchSize);
+    
+    logger.info('ReviewScheduler dueCards:', dueCards)
+    
     for (const card of dueCards) {
       await this.sendCardToChannel(card, 'scheduled');
     }
