@@ -14,16 +14,18 @@ const main = async () => {
 
   logger.info('Перед запуском бота')
   
-  await bot.launch();
-  logger.info('Бот запущен и ожидает сообщения');
+  bot.launch(() => {
+    logger.info('Бот запущен и ожидает сообщения');
 
-  scheduler.start();
-  logger.info(
-    `Планировщик повторений активирован (проверка каждые ${
-      config.scheduler.scanIntervalMs / 1000
-    } секунд)`,
-  );
+    scheduler.start();
+    logger.info(
+      `Планировщик повторений активирован (проверка каждые ${
+        config.scheduler.scanIntervalMs / 1000
+      } секунд)`,
+    );
+  });
 
+  
   const gracefulShutdown = (signal: string) => {
     logger.info(`Получен сигнал ${signal}, завершаем работу...`);
     scheduler.stop();
