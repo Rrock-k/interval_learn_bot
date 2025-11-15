@@ -14,6 +14,7 @@ const main = async () => {
 
   logger.info('Перед запуском бота')
   
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
   bot.launch(() => {
     logger.info('Бот запущен и ожидает сообщения');
 
