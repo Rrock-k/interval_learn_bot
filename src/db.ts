@@ -1,4 +1,5 @@
 import { Pool, PoolConfig } from 'pg';
+import { withDbRetry } from './utils/dbRetry';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 export type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override';
@@ -121,6 +122,7 @@ export class CardStore {
   }
 
   async init() {
+    await withDbRetry(() => this.pool.query('SELECT 1'));
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS cards (
         id TEXT PRIMARY KEY,
