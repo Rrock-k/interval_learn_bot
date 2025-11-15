@@ -1,0 +1,22 @@
+# fly.toml app configuration file generated for interval-learn-bot.
+# Rename the `app` value after running `fly apps create` or `fly launch`.
+
+app = "interval-learn-bot"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"

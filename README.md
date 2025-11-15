@@ -71,3 +71,4 @@ npm start
 - `docs/clarification-questions.md` — финализированное ТЗ и ответы на вопросы.
 - `docs/hosting-options.md` — сравнительная таблица бесплатных хостингов.
 - `docs/railway-deploy.md` — детальная инструкция по публикации на Railway.
+- `docs/fly-deploy.md` — пошаговый гид по развёртыванию на Fly.io.
