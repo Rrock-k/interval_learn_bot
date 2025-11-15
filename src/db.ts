@@ -267,7 +267,7 @@ export class CardStore {
       `
       SELECT *
       FROM cards
-      WHERE status = 'learning'
+      WHERE status IN ('learning', 'awaiting_grade')
         AND next_review_at IS NOT NULL
         AND next_review_at <= $1
       ORDER BY next_review_at ASC

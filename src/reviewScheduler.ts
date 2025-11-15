@@ -4,7 +4,7 @@ import { CardRecord, CardStore, NotificationReason } from './db';
 import { config } from './config';
 import { computeReview, gradeOptions, GradeKey } from './spacedRepetition';
 import { logger } from './logger';
-import { withDbRetry } from './utils/dbRetry'
+import { withDbRetry } from './utils/dbRetry';
 
 const buildGradeKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
@@ -50,12 +50,17 @@ export class ReviewScheduler {
   }
 
   private async tick() {
-    const dueCards = await this.store.listDueCards(config.scheduler.batchSize);
-    
-    logger.info('ReviewScheduler dueCards:', dueCards)
-    
+    const dueCards = await withDbRetry(() =>
+      this.store.listDueCards(config.scheduler.batchSize),
+    );
     for (const card of dueCards) {
-      await this.sendCardToChannel(card, 'scheduled');
+      let current = card;
+      if (current.status === 'awaiting_grade') {
+        await this.cleanupPendingMessage(current);
+        await withDbRetry(() => this.store.clearAwaitingGrade(current.id));
+        current = await withDbRetry(() => this.store.getCardById(current.id));
+      }
+      await this.sendCardToChannel(current, 'scheduled');
     }
     await this.autoGradeExpired();
   }
@@ -67,8 +72,8 @@ export class ReviewScheduler {
     }
     if (card.status === 'awaiting_grade') {
       await this.cleanupPendingMessage(card);
-      await this.store.clearAwaitingGrade(card.id);
-      card = await this.store.getCardById(cardId);
+      await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
+      card = await withDbRetry(() => this.store.getCardById(cardId));
     }
     await this.sendCardToChannel(card, 'manual_now');
   }
@@ -88,7 +93,9 @@ export class ReviewScheduler {
           },
         );
         card.baseChannelMessageId = response.message_id;
-        await this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId);
+        await withDbRetry(() =>
+          this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
+        );
         return response.message_id;
       };
 
@@ -120,7 +127,7 @@ export class ReviewScheduler {
             logger.warn(
               `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
             );
-            await this.store.setBaseChannelMessage(card.id, null);
+            await withDbRetry(() => this.store.setBaseChannelMessage(card.id, null));
             messageId = await copyOriginal();
             wasCopied = true;
           } else {
@@ -129,46 +136,54 @@ export class ReviewScheduler {
         }
       }
 
-      await this.store.markAwaitingGrade({
-        cardId: card.id,
-        channelId: config.reviewChannelId,
-        channelMessageId: messageId,
-        pendingSince: new Date().toISOString(),
-      });
-      await this.store.recordNotification({
-        cardId: card.id,
-        messageId,
-        reason,
-        sentAt: new Date().toISOString(),
-      });
+      await withDbRetry(() =>
+        this.store.markAwaitingGrade({
+          cardId: card.id,
+          channelId: config.reviewChannelId,
+          channelMessageId: messageId,
+          pendingSince: new Date().toISOString(),
+        }),
+      );
+      await withDbRetry(() =>
+        this.store.recordNotification({
+          cardId: card.id,
+          messageId,
+          reason,
+          sentAt: new Date().toISOString(),
+        }),
+      );
       logger.info(
         `Отправлена карточка ${card.id} в канал (${reason})${wasCopied ? '' : ' (reply)'}`,
       );
     } catch (error) {
       logger.error(`Не удалось отправить карточку ${card.id}`, error);
       const retryAt = dayjs().add(1, 'hour').toISOString();
-      await this.store.rescheduleCard(card.id, retryAt);
+      await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
     }
   }
 
   private async autoGradeExpired() {
     const cutoff = dayjs().subtract(1, 'minute').toISOString();
-    const expired = await this.store.listExpiredAwaitingCards(cutoff);
+    const expired = await withDbRetry(() =>
+      this.store.listExpiredAwaitingCards(cutoff),
+    );
     if (!expired.length) {
       return;
     }
     for (const card of expired) {
       try {
         const result = computeReview(card, DEFAULT_TIMEOUT_GRADE);
-        await this.store.saveReviewResult({
-          cardId: card.id,
-          grade: result.quality,
-          nextReviewAt: result.nextReviewAt,
-          repetition: result.repetition,
-          interval: result.interval,
-          easiness: result.easiness,
-          reviewedAt: new Date().toISOString(),
-        });
+        await withDbRetry(() =>
+          this.store.saveReviewResult({
+            cardId: card.id,
+            grade: result.quality,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+            interval: result.interval,
+            easiness: result.easiness,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
         if (card.pendingChannelId && card.pendingChannelMessageId) {
           try {
             await this.bot.telegram.editMessageReplyMarkup(

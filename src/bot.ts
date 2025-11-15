@@ -157,13 +157,13 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      const card = await store.getCardById(cardId);
+      const card = await withDbRetry(() => store.getCardById(cardId));
       if (card.status !== 'pending') {
         await ctx.answerCbQuery('Эта карточка уже обработана');
         return;
       }
       const nextReviewAt = computeInitialReviewDate(config.initialReviewMinutes);
-      await store.activateCard(cardId, { nextReviewAt });
+      await withDbRetry(() => store.activateCard(cardId, { nextReviewAt }));
       await ctx.answerCbQuery(
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
       );
@@ -183,12 +183,12 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      const card = await store.getCardById(cardId);
+      const card = await withDbRetry(() => store.getCardById(cardId));
       if (card.status !== 'pending') {
         await ctx.answerCbQuery('Уже обработано');
         return;
       }
-      await store.deleteCard(cardId);
+      await withDbRetry(() => store.deleteCard(cardId));
       await ctx.answerCbQuery('Удалено');
       await tryRemoveKeyboard(ctx);
     } catch (error) {
@@ -208,22 +208,24 @@ export const createBot = (store: CardStore) => {
         await ctx.answerCbQuery('Некорректное действие');
         return;
       }
-      const card = await store.findAwaitingCard(cardId);
+      const card = await withDbRetry(() => store.findAwaitingCard(cardId));
       if (!card) {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
       }
       try {
         const result = computeReview(card, grade);
-        await store.saveReviewResult({
-          cardId,
-          grade: result.quality,
-          nextReviewAt: result.nextReviewAt,
-          repetition: result.repetition,
-          interval: result.interval,
-          easiness: result.easiness,
-          reviewedAt: new Date().toISOString(),
-        });
+        await withDbRetry(() =>
+          store.saveReviewResult({
+            cardId,
+            grade: result.quality,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+            interval: result.interval,
+            easiness: result.easiness,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
         if (card.pendingChannelId && card.pendingChannelMessageId) {
           try {
             await ctx.telegram.editMessageReplyMarkup(

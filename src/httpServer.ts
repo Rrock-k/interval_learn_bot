@@ -15,6 +15,7 @@ import { CardStatus, CardStore } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import { ReviewScheduler } from './reviewScheduler';
+import { withDbRetry } from './utils/dbRetry';
 
 const publicDir = path.join(process.cwd(), 'public');
 const DASHBOARD_SESSION_COOKIE = 'dashboard_session';
@@ -145,7 +146,7 @@ export const createHttpServer = (
       return;
     }
     try {
-      const cards = await store.listCards({ status, limit });
+      const cards = await withDbRetry(() => store.listCards({ status, limit }));
       res.json({ data: cards });
     } catch (error) {
       logger.error('Ошибка чтения карточек', error);
@@ -155,7 +156,7 @@ export const createHttpServer = (
 
   app.get('/api/cards/:id/media', async (req, res) => {
     try {
-      const card = await store.getCardById(req.params.id);
+      const card = await withDbRetry(() => store.getCardById(req.params.id));
       if (!card.contentFileId) {
         res.status(404).json({ error: 'Нет медиа для этой карточки' });
         return;
@@ -186,7 +187,7 @@ export const createHttpServer = (
     const minutes = parseMinutes(req.body?.minutes, 60);
     const nextReviewAt = dayjs().add(Math.max(1, minutes), 'minute').toISOString();
     try {
-      await store.rescheduleCard(req.params.id, nextReviewAt);
+      await withDbRetry(() => store.rescheduleCard(req.params.id, nextReviewAt));
       res.json({ ok: true, nextReviewAt });
     } catch (error) {
       logger.error('Ошибка переноса карточки', error);
@@ -213,7 +214,7 @@ export const createHttpServer = (
       return;
     }
     try {
-      await store.overrideNextReview(req.params.id, nextReviewAt);
+      await withDbRetry(() => store.overrideNextReview(req.params.id, nextReviewAt));
       res.json({ ok: true, nextReviewAt });
     } catch (error) {
       logger.error('Ошибка ручного планирования', error);
@@ -228,7 +229,7 @@ export const createHttpServer = (
       return;
     }
     try {
-      await store.updateStatus(req.params.id, status);
+      await withDbRetry(() => store.updateStatus(req.params.id, status));
       res.json({ ok: true });
     } catch (error) {
       logger.error('Ошибка смены статуса', error);
@@ -238,7 +239,7 @@ export const createHttpServer = (
 
   app.delete('/api/cards/:id', async (req, res) => {
     try {
-      await store.deleteCard(req.params.id);
+      await withDbRetry(() => store.deleteCard(req.params.id));
       res.json({ ok: true });
     } catch (error) {
       logger.error('Ошибка удаления карточки', error);
