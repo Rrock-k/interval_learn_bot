@@ -4,6 +4,7 @@ import { CardRecord, CardStore, NotificationReason } from './db';
 import { config } from './config';
 import { computeReview, gradeOptions, GradeKey } from './spacedRepetition';
 import { logger } from './logger';
+import { withDbRetry } from './utils/dbRetry'
 
 const buildGradeKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
@@ -57,7 +58,7 @@ export class ReviewScheduler {
   }
 
   public async triggerImmediate(cardId: string) {
-    let card = await this.store.getCardById(cardId);
+    let card = await withDbRetry(() => this.store.getCardById(cardId));
     if (card.status === 'pending') {
       throw new Error('Карточка ещё не активирована');
     }
