@@ -6,6 +6,7 @@ import { CardStore } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import { computeInitialReviewDate, computeReview, GradeKey } from './spacedRepetition';
+import { withDbRetry } from './utils/dbRetry';
 
 type TelegrafContext = Context<Update>;
 
@@ -125,16 +126,18 @@ export const createBot = (store: CardStore) => {
 
     const cardId = uuid();
     try {
-      await store.createPendingCard({
-        id: cardId,
-        userId: `${userId}`,
-        sourceChatId: `${ctx.chat.id}`,
-        sourceMessageId: ctx.message.message_id,
-        contentType: parsed.contentType,
-        contentPreview: parsed.preview,
-        contentFileId: parsed.fileId,
-        contentFileUniqueId: parsed.fileUniqueId,
-      });
+      await withDbRetry(() =>
+        store.createPendingCard({
+          id: cardId,
+          userId: `${userId}`,
+          sourceChatId: `${ctx.chat.id}`,
+          sourceMessageId: ctx.message.message_id,
+          contentType: parsed.contentType,
+          contentPreview: parsed.preview,
+          contentFileId: parsed.fileId,
+          contentFileUniqueId: parsed.fileUniqueId,
+        }),
+      );
     } catch (error) {
       logger.error('Не удалось создать карточку', error);
       await ctx.reply('Ошибка сохранения (код: E_DB_WRITE). Попробуйте ещё раз.');
