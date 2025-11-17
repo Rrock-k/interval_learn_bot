@@ -172,11 +172,14 @@ export class ReviewScheduler {
     for (const card of expired) {
       try {
         await this.cleanupPendingMessage(card);
-        await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
+        const retryAt = dayjs()
+          .add(config.scheduler.awaitingGradeRetryMinutes, 'minute')
+          .toISOString();
+        await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
         logger.info(
           `Карточка ${card.id} возвращена в статус learning после ${Math.round(
             timeoutMs / 1000,
-          )} секунд ожидания оценки`,
+          )} секунд ожидания оценки; повтор через ${config.scheduler.awaitingGradeRetryMinutes} мин`,
         );
       } catch (error) {
         logger.error(`Ошибка возврата карточки ${card.id} после таймаута`, error);
