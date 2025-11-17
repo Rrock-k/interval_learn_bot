@@ -18,7 +18,7 @@
   - `DASHBOARD_SECRET` — пароль, который нужно ввести при попадании в панель.
   - `DATABASE_URL` — строка подключения к PostgreSQL (`postgresql://user:password@host:5432/db`).
   - `PORT` — порт веб-интерфейса (по умолчанию 3000).
-  - Необязательно: `INITIAL_REVIEW_MINUTES`, `REVIEW_SCAN_INTERVAL_MS`, `REVIEW_BATCH_SIZE`, `AWAITING_GRADE_TIMEOUT_MS`, `AWAITING_GRADE_RETRY_MINUTES`.
+  - Необязательно: `INITIAL_REVIEW_MINUTES`, `REVIEW_SCAN_INTERVAL_MS`, `REVIEW_BATCH_SIZE`.
 
 Создайте локальный `.env` на основе шаблона:
 
@@ -56,7 +56,7 @@ npm start
 
 1. Опубликуйте репозиторий на GitHub и создайте проект в [Railway](https://railway.app/) → **Deploy from GitHub repo**.
 2. Railway автоматически возьмёт Dockerfile и соберёт образ (это зафиксировано в `railway.json`).
-3. В разделе **Variables** задайте `BOT_TOKEN`, `CHAT_ID`, `DASHBOARD_SECRET`, при необходимости `INITIAL_REVIEW_MINUTES`, `REVIEW_SCAN_INTERVAL_MS`, `REVIEW_BATCH_SIZE`, `AWAITING_GRADE_TIMEOUT_MS`, `AWAITING_GRADE_RETRY_MINUTES` и/или `PORT`.
+3. В разделе **Variables** задайте `BOT_TOKEN`, `CHAT_ID`, `DASHBOARD_SECRET`, при необходимости `INITIAL_REVIEW_MINUTES`, `REVIEW_SCAN_INTERVAL_MS`, `REVIEW_BATCH_SIZE` и/или `PORT`.
 4. После первого деплоя проверьте `https://<service>.up.railway.app/healthz` — ответ `{"ok": true, ...}` подтверждает, что бот и планировщик работают.
 
 Полный пошаговый гид со скриншотами CLI-команд находится в `docs/railway-deploy.md`. Там же описаны нюансы интеграции с Railway Postgres и сценарии обновлений.

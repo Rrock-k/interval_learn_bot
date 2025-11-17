@@ -52,15 +52,8 @@ export class ReviewScheduler {
       this.store.listDueCards(config.scheduler.batchSize),
     );
     for (const card of dueCards) {
-      let current = card;
-      if (current.status === 'awaiting_grade') {
-        await this.cleanupPendingMessage(current);
-        await withDbRetry(() => this.store.clearAwaitingGrade(current.id));
-        current = await withDbRetry(() => this.store.getCardById(current.id));
-      }
-      await this.sendCardToChannel(current, 'scheduled');
+      await this.sendCardToChannel(card, 'scheduled');
     }
-    await this.recoverExpiredAwaiting();
   }
 
   public async triggerImmediate(cardId: string) {
@@ -78,6 +71,11 @@ export class ReviewScheduler {
 
   private async sendCardToChannel(card: CardRecord, reason: NotificationReason) {
     try {
+      if (card.pendingChannelId && card.pendingChannelMessageId) {
+        await this.cleanupPendingMessage(card);
+        await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
+        card = await withDbRetry(() => this.store.getCardById(card.id));
+      }
       const keyboard = buildGradeKeyboard(card.id);
       let messageId: number;
       let wasCopied = false;
@@ -157,33 +155,6 @@ export class ReviewScheduler {
       logger.error(`Не удалось отправить карточку ${card.id}`, error);
       const retryAt = dayjs().add(1, 'hour').toISOString();
       await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
-    }
-  }
-
-  private async recoverExpiredAwaiting() {
-    const timeoutMs = config.scheduler.awaitingGradeTimeoutMs;
-    const cutoff = dayjs().subtract(timeoutMs, 'millisecond').toISOString();
-    const expired = await withDbRetry(() =>
-      this.store.listExpiredAwaitingCards(cutoff),
-    );
-    if (!expired.length) {
-      return;
-    }
-    for (const card of expired) {
-      try {
-        await this.cleanupPendingMessage(card);
-        const retryAt = dayjs()
-          .add(config.scheduler.awaitingGradeRetryMinutes, 'minute')
-          .toISOString();
-        await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
-        logger.info(
-          `Карточка ${card.id} возвращена в статус learning после ${Math.round(
-            timeoutMs / 1000,
-          )} секунд ожидания оценки; повтор через ${config.scheduler.awaitingGradeRetryMinutes} мин`,
-        );
-      } catch (error) {
-        logger.error(`Ошибка возврата карточки ${card.id} после таймаута`, error);
-      }
     }
   }
 

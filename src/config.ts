@@ -26,7 +26,5 @@ export const config = {
   scheduler: {
     scanIntervalMs: toNumber(process.env.REVIEW_SCAN_INTERVAL_MS, 60_000),
     batchSize: toNumber(process.env.REVIEW_BATCH_SIZE, 5),
-    awaitingGradeTimeoutMs: toNumber(process.env.AWAITING_GRADE_TIMEOUT_MS, 5 * 60 * 1000),
-    awaitingGradeRetryMinutes: toNumber(process.env.AWAITING_GRADE_RETRY_MINUTES, 60),
   },
 };
