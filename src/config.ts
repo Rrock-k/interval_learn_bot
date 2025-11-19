@@ -21,7 +21,8 @@ export const config = {
   reviewChannelId: requireEnv('CHAT_ID'),
   databaseUrl: requireEnv('DATABASE_URL'),
   port: toNumber(process.env.PORT, 3000),
-  initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 10),
+  adminChatId: process.env.ADMIN_CHAT_ID,
+  initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 60),
   dashboardSecret: requireEnv('DASHBOARD_SECRET'),
   scheduler: {
     scanIntervalMs: toNumber(process.env.REVIEW_SCAN_INTERVAL_MS, 60_000),

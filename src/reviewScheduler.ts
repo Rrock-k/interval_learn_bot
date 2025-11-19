@@ -76,12 +76,17 @@ export class ReviewScheduler {
         await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
         card = await withDbRetry(() => this.store.getCardById(card.id));
       }
+
+      // Determine target chat ID
+      const user = await withDbRetry(() => this.store.getUser(card.userId));
+      const targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
+
       const keyboard = buildGradeKeyboard(card.id);
       let messageId: number;
       let wasCopied = false;
       const copyOriginal = async () => {
         const response = await this.bot.telegram.copyMessage(
-          config.reviewChannelId,
+          targetChatId,
           card.sourceChatId,
           card.sourceMessageId,
           {
@@ -101,7 +106,7 @@ export class ReviewScheduler {
       } else {
         try {
           const reminder = await this.bot.telegram.sendMessage(
-            config.reviewChannelId,
+            targetChatId,
             '🔔 Время повторить запись',
             {
               reply_markup: keyboard.reply_markup,
@@ -135,7 +140,7 @@ export class ReviewScheduler {
       await withDbRetry(() =>
         this.store.markAwaitingGrade({
           cardId: card.id,
-          channelId: config.reviewChannelId,
+          channelId: targetChatId,
           channelMessageId: messageId,
           pendingSince: new Date().toISOString(),
         }),

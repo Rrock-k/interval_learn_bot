@@ -36,6 +36,7 @@
     "skipLibCheck": true,
 
     "esModuleInterop": true,
-    "resolveJsonModule": true,
-  }
+    "resolveJsonModule": true
+  },
+  "exclude": ["node_modules", "drizzle.config.ts", "dist"]
 }

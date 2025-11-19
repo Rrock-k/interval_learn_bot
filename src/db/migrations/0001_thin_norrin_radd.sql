@@ -1,0 +1,2 @@
+ALTER TABLE "cards" ADD CONSTRAINT "cards_status_check" CHECK ("cards"."status" IN ('pending', 'learning', 'awaiting_grade', 'archived'));--> statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_status_check" CHECK ("users"."status" IN ('pending', 'approved', 'rejected'));

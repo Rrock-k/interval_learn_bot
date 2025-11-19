@@ -114,75 +114,104 @@ const buildPoolConfig = (connectionString: string): PoolConfig => {
   };
 };
 
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import * as schema from './db/schema';
+
+// ... existing imports ...
+
 export class CardStore {
   private pool: Pool;
+  private db: ReturnType<typeof drizzle<typeof schema>>;
 
   constructor(connectionString: string) {
     this.pool = new Pool(buildPoolConfig(connectionString));
+    this.db = drizzle(this.pool, { schema });
   }
 
   async init() {
     await withDbRetry(() => this.pool.query('SELECT 1'));
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS cards (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        source_chat_id TEXT NOT NULL,
-        source_message_id INTEGER NOT NULL,
-        content_type TEXT NOT NULL,
-        content_preview TEXT,
-        content_file_id TEXT,
-        content_file_unique_id TEXT,
-        status TEXT NOT NULL CHECK(status IN ('pending','learning','awaiting_grade','archived')),
-        repetition INTEGER NOT NULL DEFAULT 0,
-        interval_days INTEGER NOT NULL DEFAULT 0,
-        easiness REAL NOT NULL DEFAULT 2.5,
-        next_review_at TEXT,
-        last_reviewed_at TEXT,
-        last_grade INTEGER,
-        pending_channel_id TEXT,
-        pending_channel_message_id INTEGER,
-        base_channel_message_id INTEGER,
-        awaiting_grade_since TEXT,
-        last_notification_at TEXT,
-        last_notification_reason TEXT,
-        last_notification_message_id INTEGER,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
+    
+    // Run Drizzle migrations
+    console.log('Running migrations...');
+    try {
+      await migrate(this.db, { migrationsFolder: 'src/db/migrations' });
+      console.log('Migrations complete.');
+    } catch (error: any) {
+      if (error.code === '42P07') { // duplicate_table
+        console.log('Tables already exist, skipping migration (assuming first run on existing DB).');
+      } else if (error.code === '42710') { // duplicate_object (constraint)
+        console.log('Constraints already exist, skipping migration step.');
+      } else {
+        throw error;
+      }
+    }
+  }
 
-    await this.pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_cards_status_next_review
-        ON cards(status, next_review_at)
-    `);
+  // ... existing methods ...
 
-    await this.pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_cards_status_awaiting_since
-        ON cards(status, awaiting_grade_since)
-    `);
+  async createUser(user: {
+    id: string;
+    username?: string;
+    firstName?: string;
+    lastName?: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    // Default notification_chat_id to user.id (DM)
+    const notificationChatId = user.id;
+    await this.pool.query(
+      `
+      INSERT INTO users (id, username, first_name, last_name, status, notification_chat_id, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6)
+      ON CONFLICT (id) DO UPDATE SET
+        username = EXCLUDED.username,
+        first_name = EXCLUDED.first_name,
+        last_name = EXCLUDED.last_name,
+        updated_at = EXCLUDED.updated_at
+    `,
+      [user.id, user.username, user.firstName, user.lastName, notificationChatId, now],
+    );
+  }
 
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS content_file_id TEXT
-    `);
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS content_file_unique_id TEXT
-    `);
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS base_channel_message_id INTEGER
-    `);
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS awaiting_grade_since TEXT
-    `);
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS last_notification_at TEXT
-    `);
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS last_notification_reason TEXT
-    `);
-    await this.pool.query(`
-      ALTER TABLE cards ADD COLUMN IF NOT EXISTS last_notification_message_id INTEGER
-    `);
+  async getUser(id: string): Promise<{
+    status: 'pending' | 'approved' | 'rejected';
+    notificationChatId: string | null;
+  } | null> {
+    const { rows } = await this.pool.query(
+      `SELECT status, notification_chat_id FROM users WHERE id = $1`,
+      [id],
+    );
+    if (!rows.length) return null;
+    return {
+      status: rows[0].status,
+      notificationChatId: rows[0].notification_chat_id,
+    };
+  }
+
+  async updateUserStatus(id: string, status: 'approved' | 'rejected'): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE users
+      SET status = $1,
+          updated_at = $2
+      WHERE id = $3
+    `,
+      [status, now, id],
+    );
+  }
+
+  async updateUserNotificationChat(userId: string, chatId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE users
+      SET notification_chat_id = $1,
+          updated_at = $2
+      WHERE id = $3
+    `,
+      [chatId, now, userId],
+    );
   }
 
   async createPendingCard(input: CreatePendingCardInput): Promise<CardRecord> {

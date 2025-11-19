@@ -1,0 +1,7 @@
+pre-push:
+  parallel: true
+  commands:
+    db-check:
+      run: npm run db:check
+    lint:
+      run: npm run lint

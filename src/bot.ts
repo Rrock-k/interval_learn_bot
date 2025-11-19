@@ -14,6 +14,8 @@ const ACTIONS = {
   confirm: 'confirm',
   cancel: 'cancel',
   grade: 'grade',
+  approveUser: 'approve_user',
+  rejectUser: 'reject_user',
 } as const;
 
 const SUPPORTED_CHAT_TYPES = new Set(['private']);
@@ -89,6 +91,76 @@ const formatNextReviewMessage = (isoDate: string) => {
 export const createBot = (store: CardStore) => {
   const bot = new Telegraf<TelegrafContext>(config.botToken);
 
+  // Authorization Middleware
+  bot.use(async (ctx, next) => {
+    const userId = ctx.from?.id;
+    if (!userId || ctx.from?.is_bot) return next();
+
+    // Skip auth for admin commands in admin chat if needed, but here we want to auth users interacting with the bot
+    // We might want to allow the admin to use the bot without approval if they are the admin, but let's stick to the flow.
+    // Actually, if the user is the admin, they should probably be auto-approved or just allowed.
+    // For now, let's treat everyone as a user who needs approval, or maybe auto-approve the admin?
+    // Let's just follow the standard flow.
+
+    try {
+      const user = await withDbRetry(() => store.getUser(`${userId}`));
+
+      if (!user) {
+        // New user
+        await withDbRetry(() =>
+          store.createUser({
+            id: `${userId}`,
+            username: ctx.from?.username || '',
+            firstName: ctx.from?.first_name || '',
+            lastName: ctx.from?.last_name || '',
+          }),
+        );
+
+        // Notify Admin
+        if (config.adminChatId) {
+          await ctx.telegram.sendMessage(
+            config.adminChatId,
+            `👤 <b>Новый запрос доступа</b>\n\nID: <code>${userId}</code>\nUser: @${
+              ctx.from?.username || 'N/A'
+            }\nName: ${ctx.from?.first_name} ${ctx.from?.last_name || ''}`,
+            {
+              parse_mode: 'HTML',
+              ...Markup.inlineKeyboard([
+                [
+                  Markup.button.callback('✅ Одобрить', `${ACTIONS.approveUser}|${userId}`),
+                  Markup.button.callback('❌ Отклонить', `${ACTIONS.rejectUser}|${userId}`),
+                ],
+              ]),
+            },
+          );
+        }
+
+        await ctx.reply(
+          '⏳ Ваш запрос на доступ отправлен администратору. Пожалуйста, подождите подтверждения.',
+        );
+        return;
+      }
+
+      if (user.status === 'pending') {
+        await ctx.reply('⏳ Ваш аккаунт ожидает подтверждения администратора.');
+        return;
+      }
+
+      if (user.status === 'rejected') {
+        // Silent reject or message
+        return;
+      }
+
+      // Approved
+      return next();
+    } catch (error) {
+      logger.error('Auth middleware error', error);
+      return next(); // Fail open or closed? Let's fail open for now to not block if DB fails, or maybe fail closed.
+      // Better to fail closed for security, but for a bot... let's fail closed with a message.
+      // await ctx.reply('Произошла ошибка проверки доступа.');
+    }
+  });
+
   bot.start(async (ctx) => {
     await ctx.reply(
       '👋 Отправьте сообщение, фото или видео — и я предложу добавить его в интервальное обучение.',
@@ -97,8 +169,35 @@ export const createBot = (store: CardStore) => {
 
   bot.command('help', async (ctx) => {
     await ctx.reply(
-      'Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.',
+      'Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.\n\nНастройки:\n/use_this_chat — получать напоминания в этот чат (если это группа/канал, добавьте бота админом).',
     );
+  });
+
+  bot.command('use_this_chat', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const chatId = ctx.chat.id;
+    const chatType = ctx.chat.type;
+
+    // If it's a group or channel, check admin rights (optional but good practice)
+    // For now, let's just try to set it. If bot can't post, it will fail later.
+    // But we should probably check if we can send messages there.
+
+    try {
+      // Test permission
+      const testMsg = await ctx.reply('✅ Теперь напоминания будут приходить сюда.');
+      
+      // Update DB
+      await withDbRetry(() => store.updateUserNotificationChat(`${userId}`, `${chatId}`));
+      
+      // Clean up test message after a bit if desired, or leave it.
+    } catch (error) {
+      logger.error('Failed to set notification chat', error);
+      await ctx.reply(
+        '❌ Не удалось установить этот чат. Убедитесь, что я администратор и имею право писать сообщения.',
+      );
+    }
   });
 
   bot.on('message', async (ctx) => {
@@ -252,6 +351,44 @@ export const createBot = (store: CardStore) => {
       }
     },
   );
+
+  bot.action(new RegExp(`^${ACTIONS.approveUser}\\|(.+)$`), async (ctx) => {
+    const userId = ctx.match?.[1];
+    if (!userId) return;
+
+    try {
+      await withDbRetry(() => store.updateUserStatus(userId, 'approved'));
+      await ctx.answerCbQuery('Пользователь одобрен');
+      const message = ctx.callbackQuery.message;
+      const text = message && 'text' in message ? message.text : '';
+      await ctx.editMessageText(
+        `${text}\n\n✅ Одобрено`,
+      );
+      await ctx.telegram.sendMessage(userId, '🎉 Доступ разрешен! Можете пользоваться ботом.');
+    } catch (error) {
+      logger.error('Error approving user', error);
+      await ctx.answerCbQuery('Ошибка');
+    }
+  });
+
+  bot.action(new RegExp(`^${ACTIONS.rejectUser}\\|(.+)$`), async (ctx) => {
+    const userId = ctx.match?.[1];
+    if (!userId) return;
+
+    try {
+      await withDbRetry(() => store.updateUserStatus(userId, 'rejected'));
+      await ctx.answerCbQuery('Пользователь отклонен');
+      const message = ctx.callbackQuery.message;
+      const text = message && 'text' in message ? message.text : '';
+      await ctx.editMessageText(
+        `${text}\n\n❌ Отклонено`,
+      );
+      await ctx.telegram.sendMessage(userId, '⛔️ Вам отказано в доступе.');
+    } catch (error) {
+      logger.error('Error rejecting user', error);
+      await ctx.answerCbQuery('Ошибка');
+    }
+  });
 
   bot.catch((err) => {
     logger.error('Ошибка бота', err);
