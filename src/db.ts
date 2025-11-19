@@ -138,9 +138,11 @@ export class CardStore {
       await migrate(this.db, { migrationsFolder: 'src/db/migrations' });
       console.log('Migrations complete.');
     } catch (error: any) {
-      if (error.code === '42P07') { // duplicate_table
+      // Check for wrapped error code (DrizzleQueryError wraps the actual PG error)
+      const errorCode = error.code || error.cause?.code;
+      if (errorCode === '42P07') { // duplicate_table
         console.log('Tables already exist, skipping migration (assuming first run on existing DB).');
-      } else if (error.code === '42710') { // duplicate_object (constraint)
+      } else if (errorCode === '42710') { // duplicate_object (constraint)
         console.log('Constraints already exist, skipping migration step.');
       } else {
         throw error;

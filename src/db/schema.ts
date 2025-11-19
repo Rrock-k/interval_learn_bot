@@ -13,12 +13,12 @@ export const users = pgTable(
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
-  (table) => ({
-    statusCheck: check(
+  (table) => [
+    check(
       'users_status_check',
       sql`${table.status} IN ('pending', 'approved', 'rejected')`,
     ),
-  }),
+  ],
 );
 
 export const cards = pgTable(
@@ -49,20 +49,18 @@ export const cards = pgTable(
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
-  (table) => {
-    return {
-      idxCardsStatusNextReview: index('idx_cards_status_next_review').on(
-        table.status,
-        table.nextReviewAt,
-      ),
-      idxCardsStatusAwaitingSince: index('idx_cards_status_awaiting_since').on(
-        table.status,
-        table.awaitingGradeSince,
-      ),
-      statusCheck: check(
-        'cards_status_check',
-        sql`${table.status} IN ('pending', 'learning', 'awaiting_grade', 'archived')`,
-      ),
-    };
-  },
+  (table) => [
+    index('idx_cards_status_next_review').on(
+      table.status,
+      table.nextReviewAt,
+    ),
+    index('idx_cards_status_awaiting_since').on(
+      table.status,
+      table.awaitingGradeSince,
+    ),
+    check(
+      'cards_status_check',
+      sql`${table.status} IN ('pending', 'learning', 'awaiting_grade', 'archived')`,
+    ),
+  ],
 );

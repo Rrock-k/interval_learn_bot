@@ -1,4 +1,4 @@
-CREATE TABLE "cards" (
+CREATE TABLE IF NOT EXISTS "cards" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"source_chat_id" text NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE "cards" (
 	"updated_at" text NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "users" (
+CREATE TABLE IF NOT EXISTS "users" (
 	"id" text PRIMARY KEY NOT NULL,
 	"username" text,
 	"first_name" text,
@@ -36,5 +36,5 @@ CREATE TABLE "users" (
 	"updated_at" text NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "idx_cards_status_next_review" ON "cards" USING btree ("status","next_review_at");--> statement-breakpoint
-CREATE INDEX "idx_cards_status_awaiting_since" ON "cards" USING btree ("status","awaiting_grade_since");
+CREATE INDEX IF NOT EXISTS "idx_cards_status_next_review" ON "cards" USING btree ("status","next_review_at");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_cards_status_awaiting_since" ON "cards" USING btree ("status","awaiting_grade_since");
