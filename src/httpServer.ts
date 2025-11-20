@@ -138,37 +138,78 @@ export const createHttpServer = (
 
   // Mini App authentication middleware
   const verifyTelegramWebAppData = (initData: string): { userId: string } | null => {
-    if (!initData) return null;
+    if (!initData) {
+      logger.warn('[MiniApp Auth] No initData provided');
+      return null;
+    }
+    
+    logger.info('[MiniApp Auth] Validating initData, length:', initData.length);
     
     try {
       const params = new URLSearchParams(initData);
       const hash = params.get('hash');
-      params.delete('hash');
       
-      if (!hash) return null;
+      // Remove hash and signature from params before validation
+      params.delete('hash');
+      params.delete('signature');
+      
+      if (!hash) {
+        logger.warn('[MiniApp Auth] No hash in initData');
+        return null;
+      }
+      
+      logger.info('[MiniApp Auth] Hash received:', hash);
       
       const dataCheckString = Array.from(params.entries())
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
       
+      logger.info('[MiniApp Auth] Data check string:', dataCheckString);
+      
       const secretKey = createHmac('sha256', 'WebAppData').update(config.botToken).digest();
       const calculatedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
       
-      if (calculatedHash !== hash) return null;
+      logger.info('[MiniApp Auth] Calculated hash:', calculatedHash);
+      logger.info('[MiniApp Auth] Hashes match:', calculatedHash === hash);
+      
+      if (calculatedHash !== hash) {
+        logger.warn('[MiniApp Auth] Hash mismatch');
+        return null;
+      }
       
       const authDate = params.get('auth_date');
-      if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) {
-        return null; // Data is too old
+      if (!authDate) {
+        logger.warn('[MiniApp Auth] No auth_date');
+        return null;
+      }
+      
+      const authTimestamp = Number(authDate);
+      const currentTimestamp = Date.now() / 1000;
+      const age = currentTimestamp - authTimestamp;
+      
+      logger.info('[MiniApp Auth] Auth age (seconds):', age);
+      
+      if (age > 86400) {
+        logger.warn('[MiniApp Auth] Data too old:', age, 'seconds');
+        return null;
       }
       
       const userParam = params.get('user');
-      if (!userParam) return null;
+      if (!userParam) {
+        logger.warn('[MiniApp Auth] No user param');
+        return null;
+      }
+      
+      logger.info('[MiniApp Auth] User param:', userParam);
       
       const user = JSON.parse(userParam);
-      return { userId: String(user.id) };
+      const userId = String(user.id);
+      
+      logger.info('[MiniApp Auth] Success! User ID:', userId);
+      return { userId };
     } catch (error) {
-      logger.error('Telegram WebApp auth error', error);
+      logger.error('[MiniApp Auth] Exception during validation:', error);
       return null;
     }
   };
