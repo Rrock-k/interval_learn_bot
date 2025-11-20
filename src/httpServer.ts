@@ -146,6 +146,8 @@ export const createHttpServer = (
     
     try {
       logger.info('[MiniApp Auth] Validating initData with library');
+      logger.info('[MiniApp Auth] Bot token length:', config.botToken.length);
+      logger.info('[MiniApp Auth] Original initData:', initData);
       
       // Remove signature parameter manually to preserve original encoding
       const cleanInitData = initData
@@ -153,7 +155,7 @@ export const createHttpServer = (
         .filter(param => !param.startsWith('signature='))
         .join('&');
       
-      logger.info('[MiniApp Auth] Cleaned initData (signature removed)');
+      logger.info('[MiniApp Auth] Cleaned initData:', cleanInitData);
       
       // Validate using official Telegram library
       validate(cleanInitData, config.botToken, { expiresIn: 86400 });
