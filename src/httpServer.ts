@@ -147,10 +147,11 @@ export const createHttpServer = (
     try {
       logger.info('[MiniApp Auth] Validating initData with library');
       
-      // Remove signature parameter if present (not part of standard validation)
-      const params = new URLSearchParams(initData);
-      params.delete('signature');
-      const cleanInitData = params.toString();
+      // Remove signature parameter manually to preserve original encoding
+      const cleanInitData = initData
+        .split('&')
+        .filter(param => !param.startsWith('signature='))
+        .join('&');
       
       logger.info('[MiniApp Auth] Cleaned initData (signature removed)');
       
