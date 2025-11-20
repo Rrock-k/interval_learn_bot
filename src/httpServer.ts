@@ -151,14 +151,17 @@ export const createHttpServer = (
       let hash = '';
       
       initData.split('&').forEach(param => {
-        const [key, value] = param.split('=');
-        if (!key) return;
+        const equalIndex = param.indexOf('=');
+        if (equalIndex === -1) return;
+        
+        const key = param.substring(0, equalIndex);
+        const value = param.substring(equalIndex + 1);
         
         if (key === 'hash') {
-          hash = value || '';
+          hash = value;
         } else if (key !== 'signature') {
           // Keep URL-encoded values as-is
-          params[key] = value || '';
+          params[key] = value;
         }
       });
       
