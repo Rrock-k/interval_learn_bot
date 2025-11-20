@@ -244,6 +244,9 @@ export const createHttpServer = (
     }
   });
 
+  // Serve static files (including Mini App assets) - must be before auth middleware
+  app.use(express.static(publicDir));
+
   // Dashboard routes (require dashboard auth)
   app.use(requireDashboardAuth);
 
@@ -355,8 +358,6 @@ export const createHttpServer = (
       res.status(500).json({ error: 'Не удалось удалить карточку' });
     }
   });
-
-  app.use(express.static(publicDir));
 
   app.get('/', (_req, res) => {
     res.sendFile(path.join(publicDir, 'dashboard.html'));
