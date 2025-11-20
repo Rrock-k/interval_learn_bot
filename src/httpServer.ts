@@ -136,6 +136,115 @@ export const createHttpServer = (
     res.redirect('/login');
   });
 
+  // Mini App authentication middleware
+  const verifyTelegramWebAppData = (initData: string): { userId: string } | null => {
+    if (!initData) return null;
+    
+    try {
+      const params = new URLSearchParams(initData);
+      const hash = params.get('hash');
+      params.delete('hash');
+      
+      if (!hash) return null;
+      
+      const dataCheckString = Array.from(params.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
+      
+      const secretKey = createHmac('sha256', 'WebAppData').update(config.botToken).digest();
+      const calculatedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+      
+      if (calculatedHash !== hash) return null;
+      
+      const authDate = params.get('auth_date');
+      if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) {
+        return null; // Data is too old
+      }
+      
+      const userParam = params.get('user');
+      if (!userParam) return null;
+      
+      const user = JSON.parse(userParam);
+      return { userId: String(user.id) };
+    } catch (error) {
+      logger.error('Telegram WebApp auth error', error);
+      return null;
+    }
+  };
+
+  const requireMiniAppAuth = (req: Request, res: Response, next: NextFunction) => {
+    const initData = req.headers['x-telegram-init-data'] as string | undefined;
+    
+    if (!initData) {
+      res.status(401).json({ error: 'Missing Telegram auth data' });
+      return;
+    }
+    
+    const authResult = verifyTelegramWebAppData(initData);
+    
+    if (!authResult) {
+      res.status(401).json({ error: 'Invalid Telegram auth data' });
+      return;
+    }
+    
+    (req as any).userId = authResult.userId;
+    next();
+  };
+
+  // Mini App public routes
+  app.get('/miniapp', (_req, res) => {
+    res.sendFile(path.join(publicDir, 'miniapp', 'index.html'));
+  });
+
+  // Mini App API routes
+  app.get('/api/miniapp/cards', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const status = req.query.status as CardStatus | undefined;
+    const limit = parseLimit(req.query.limit, 100);
+    
+    if (status && !allowedStatuses.includes(status)) {
+      res.status(400).json({ error: 'Invalid status' });
+      return;
+    }
+    
+    try {
+      const allCards = await withDbRetry(() => store.listCards({ status, limit }));
+      const userCards = allCards.filter(card => card.userId === userId);
+      res.json({ data: userCards });
+    } catch (error) {
+      logger.error('Error loading cards for Mini App', error);
+      res.status(500).json({ error: 'Failed to load cards' });
+    }
+  });
+
+  app.get('/api/miniapp/stats', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    
+    try {
+      const allCards = await withDbRetry(() => store.listCards({ limit: 1000 }));
+      const userCards = allCards.filter(card => card.userId === userId);
+      
+      const stats = {
+        total: userCards.length,
+        pending: userCards.filter(c => c.status === 'pending').length,
+        learning: userCards.filter(c => c.status === 'learning').length,
+        awaitingGrade: userCards.filter(c => c.status === 'awaiting_grade').length,
+        archived: userCards.filter(c => c.status === 'archived').length,
+        dueToday: userCards.filter(c => {
+          if (!c.nextReviewAt) return false;
+          return new Date(c.nextReviewAt) <= new Date();
+        }).length,
+      };
+      
+      res.json({ data: stats });
+    } catch (error) {
+      logger.error('Error loading stats for Mini App', error);
+      res.status(500).json({ error: 'Failed to load stats' });
+    }
+  });
+
+  // Dashboard routes (require dashboard auth)
   app.use(requireDashboardAuth);
 
   app.get('/api/cards', async (req, res) => {
