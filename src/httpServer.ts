@@ -176,6 +176,8 @@ export const createHttpServer = (
       
       if (calculatedHash !== hash) {
         logger.warn('[MiniApp Auth] Hash mismatch');
+        logger.warn('[MiniApp Auth] IMPORTANT: Check if BOT_TOKEN in .env matches the bot that launched the Mini App!');
+        logger.warn(`[MiniApp Auth] Token used (first 5 chars): ${config.botToken.substring(0, 5)}...`);
         return null;
       }
       
