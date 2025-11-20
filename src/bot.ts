@@ -88,6 +88,22 @@ const formatNextReviewMessage = (isoDate: string) => {
   return `через ~${Math.max(1, diffDays)} д`;
 };
 
+const getWebAppUrl = () => {
+  const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
+  const protocol = domain.includes('localhost') ? 'http://' : 'https://';
+  return `${protocol}${domain}/miniapp`;
+};
+
+const getWebAppKeyboard = (url: string) =>
+  Markup.inlineKeyboard([
+    [Markup.button.webApp('🚀 Открыть приложение', url)],
+  ]);
+
+const getDeepLinkKeyboard = (botUsername: string) =>
+  Markup.inlineKeyboard([
+    [Markup.button.url('➡️ Открыть в ЛС', `https://t.me/${botUsername}?start=webapp`)],
+  ]);
+
 export const createBot = (store: CardStore) => {
   const bot = new Telegraf<TelegrafContext>(config.botToken);
 
@@ -164,21 +180,15 @@ export const createBot = (store: CardStore) => {
   bot.start(async (ctx) => {
     const payload = ctx.payload; // /start <payload>
     if (payload === 'webapp') {
-      const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
-      const protocol = domain.includes('localhost') ? 'http://' : 'https://';
-      const webAppUrl = `${protocol}${domain}/miniapp`;
-      
       await ctx.reply(
         '📱 Откройте приложение для управления вашими карточками:',
-        Markup.inlineKeyboard([
-          [Markup.button.webApp('� Открыть приложение', webAppUrl)],
-        ])
+        getWebAppKeyboard(getWebAppUrl())
       );
       return;
     }
 
     await ctx.reply(
-      '�👋 Отправьте сообщение, фото или видео — и я предложу добавить его в интервальное обучение.',
+      '👋 Отправьте сообщение, фото или видео — и я предложу добавить его в интервальное обучение.',
     );
   });
 
@@ -195,25 +205,17 @@ export const createBot = (store: CardStore) => {
     logger.info(`Command /webapp received from user ${userId} in chat ${chatId} (${chatType})`);
 
     try {
-      const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
-      const protocol = domain.includes('localhost') ? 'http://' : 'https://';
-      const webAppUrl = `${protocol}${domain}/miniapp`;
-      
       if (chatType === 'private') {
         await ctx.reply(
           '📱 Откройте приложение для управления вашими карточками:',
-          Markup.inlineKeyboard([
-            [Markup.button.webApp('🚀 Открыть приложение', webAppUrl)],
-          ])
+          getWebAppKeyboard(getWebAppUrl())
         );
       } else {
         // In groups, we can't use web_app buttons. Redirect to private chat.
         const botUsername = ctx.botInfo.username;
         await ctx.reply(
           '📱 Чтобы открыть приложение, перейдите в личные сообщения:',
-          Markup.inlineKeyboard([
-            [Markup.button.url('➡️ Открыть в ЛС', `https://t.me/${botUsername}?start=webapp`)],
-          ])
+          getDeepLinkKeyboard(botUsername)
         );
       }
       logger.info(`WebApp button sent to chat ${chatId}`);
@@ -442,6 +444,45 @@ export const createBot = (store: CardStore) => {
       logger.error('Error rejecting user', error);
       await ctx.answerCbQuery('Ошибка');
     }
+  });
+
+  bot.on('inline_query', async (ctx) => {
+    const botUsername = ctx.botInfo.username;
+
+    const results: any[] = [
+      {
+        type: 'article',
+        id: 'webapp',
+        title: '📱 Открыть приложение',
+        description: 'Управление карточками и интервальным повторением',
+        thumbnail_url: 'https://img.icons8.com/fluency/96/learning.png', // Optional: nice icon
+        input_message_content: {
+          message_text: '📱 Чтобы открыть приложение, перейдите в личные сообщения:',
+        },
+        reply_markup: getDeepLinkKeyboard(botUsername).reply_markup,
+      },
+      {
+        type: 'article',
+        id: 'use_this_chat',
+        title: '🔔 Использовать этот чат',
+        description: 'Получать напоминания сюда',
+        input_message_content: {
+          message_text: '/use_this_chat',
+        },
+      },
+      {
+        type: 'article',
+        id: 'help',
+        title: '❓ Помощь',
+        description: 'Как пользоваться ботом',
+        input_message_content: {
+          message_text: 'Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.\n\nКоманды:\n/webapp — открыть приложение для управления карточками\n/use_this_chat — получать напоминания в этот чат.',
+        },
+      },
+    ];
+
+    // Filter based on query if needed, but for now just show all
+    await ctx.answerInlineQuery(results, { cache_time: 0 });
   });
 
   bot.catch((err) => {
