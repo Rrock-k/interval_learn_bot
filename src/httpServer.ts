@@ -145,12 +145,8 @@ export const createHttpServer = (
     }
     
     try {
-      logger.info('[MiniApp Auth] Starting Hybrid Validation');
-      const botToken = config.botToken.trim();
-      const tokenHash = createHash('sha256').update(botToken).digest('hex').substring(0, 8);
-      logger.info(`[MiniApp Auth] Bot Token Fingerprint (SHA256): ${tokenHash}`);
-
-      // Strategy 1: Standard (Decoded Values)
+      logger.info('[MiniApp Auth] Validating initData (Strategy: Decoded + Signature)');
+      
       const params = new URLSearchParams(initData);
       const hash = params.get('hash');
       
@@ -159,69 +155,40 @@ export const createHttpServer = (
         return null;
       }
       
+      // Remove ONLY hash, KEEP signature
       params.delete('hash');
-      params.delete('signature');
       
-      const dataCheckStringDecoded = Array.from(params.entries())
+      // Sort and create data check string (DECODED values)
+      const dataCheckString = Array.from(params.entries())
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
       
+      const botToken = config.botToken.trim();
       const secretKey = createHmac('sha256', 'WebAppData').update(botToken).digest();
-      const calcHashDecoded = createHmac('sha256', secretKey).update(dataCheckStringDecoded).digest('hex');
+      const calculatedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
       
-      if (calcHashDecoded === hash) {
-        logger.info('[MiniApp Auth] Strategy 1 (Decoded) Matched!');
-        return processSuccess(params);
+      if (calculatedHash !== hash) {
+        logger.warn(`[MiniApp Auth] Hash mismatch. Calc: ${calculatedHash} vs Hash: ${hash}`);
+        return null;
       }
       
-      logger.warn(`[MiniApp Auth] Strategy 1 Failed. Calc: ${calcHashDecoded} vs Hash: ${hash}`);
-
-      // Strategy 2: Raw (Encoded Values)
-      const paramsRaw: Record<string, string> = {};
-      initData.split('&').forEach(param => {
-        const eq = param.indexOf('=');
-        if (eq === -1) return;
-        const key = param.substring(0, eq);
-        const val = param.substring(eq + 1);
-        if (key !== 'hash' && key !== 'signature') {
-          paramsRaw[key] = val;
-        }
-      });
-      
-      const dataCheckStringRaw = Object.keys(paramsRaw)
-        .sort()
-        .map(key => `${key}=${paramsRaw[key]}`)
-        .join('\n');
-        
-      const calcHashRaw = createHmac('sha256', secretKey).update(dataCheckStringRaw).digest('hex');
-      
-      if (calcHashRaw === hash) {
-        logger.info('[MiniApp Auth] Strategy 2 (Raw) Matched!');
-        return processSuccess(new URLSearchParams(initData));
+      // Check expiration
+      const authDate = params.get('auth_date');
+      if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) {
+        logger.warn('[MiniApp Auth] Data expired');
+        return null;
       }
-
-      logger.warn(`[MiniApp Auth] Strategy 2 Failed. Calc: ${calcHashRaw} vs Hash: ${hash}`);
-      logger.warn('[MiniApp Auth] All strategies failed. Checking token...');
       
-      return null;
-
+      const userParam = params.get('user');
+      if (!userParam) return null;
+      
+      const user = JSON.parse(userParam);
+      return { userId: String(user.id) };
     } catch (error) {
       logger.error('[MiniApp Auth] Validation error:', error);
       return null;
     }
-  };
-
-  const processSuccess = (params: URLSearchParams) => {
-    const authDate = params.get('auth_date');
-    if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) {
-      logger.warn('[MiniApp Auth] Data expired');
-      return null;
-    }
-    const userParam = params.get('user');
-    if (!userParam) return null;
-    const user = JSON.parse(userParam);
-    return { userId: String(user.id) };
   };
 
   const requireMiniAppAuth = (req: Request, res: Response, next: NextFunction) => {
