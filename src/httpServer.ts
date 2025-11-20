@@ -145,32 +145,67 @@ export const createHttpServer = (
     }
     
     try {
-      logger.info('[MiniApp Auth] Validating initData with library');
-      logger.info('[MiniApp Auth] Bot token length:', config.botToken.length);
-      logger.info('[MiniApp Auth] Original initData:', initData);
+      logger.info('[MiniApp Auth] Manual validation of initData');
       
-      // Remove signature parameter manually to preserve original encoding
-      const cleanInitData = initData
-        .split('&')
-        .filter(param => !param.startsWith('signature='))
-        .join('&');
+      // Parse params manually, preserving URL encoding
+      const params: Record<string, string> = {};
+      let hashValue = '';
       
-      logger.info('[MiniApp Auth] Cleaned initData:', cleanInitData);
+      initData.split('&').forEach(param => {
+        const equalIndex = param.indexOf('=');
+        if (equalIndex === -1) return;
+        
+        const key = param.substring(0, equalIndex);
+        const value = param.substring(equalIndex + 1);
+        
+        // Exclude hash and signature from validation data
+        if (key === 'hash') {
+          hashValue = value;
+        } else if (key !== 'signature') {
+          params[key] = value;
+        }
+      });
       
-      // Validate using official Telegram library
-      validate(cleanInitData, config.botToken, { expiresIn: 86400 });
-      
-      // Parse the validated data
-      const data = parse(cleanInitData);
-      
-      if (!data.user) {
-        logger.warn('[MiniApp Auth] No user in initData');
+      if (!hashValue) {
+        logger.warn('[MiniApp Auth] No hash in initData');
         return null;
       }
       
-      const userId = String(data.user.id);
-      logger.info('[MiniApp Auth] Success! User ID:', userId);
+      // Create data check string (sorted params with URL-encoded values)
+      const dataCheckString = Object.keys(params)
+        .sort()
+        .map(key => `${key}=${params[key]}`)
+        .join('\n');
       
+      // Compute expected hash
+      const secretKey = createHmac('sha256', 'WebAppData').update(config.botToken).digest();
+      const expectedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+      
+      logger.info('[MiniApp Auth] Hash match:', expectedHash === hashValue);
+      
+      if (expectedHash !== hashValue) {
+        logger.warn('[MiniApp Auth] Hash mismatch');
+        return null;
+      }
+      
+      // Check expiration
+      const authDate = params['auth_date'];
+      if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) {
+        logger.warn('[MiniApp Auth] Data expired or missing auth_date');
+        return null;
+      }
+      
+      // Parse user
+      const userParam = params['user'];
+      if (!userParam) {
+        logger.warn('[MiniApp Auth] No user param');
+        return null;
+      }
+      
+      const user = JSON.parse(decodeURIComponent(userParam));
+      const userId = String(user.id);
+      
+      logger.info('[MiniApp Auth] Success! User ID:', userId);
       return { userId };
     } catch (error) {
       logger.error('[MiniApp Auth] Validation failed:', error);
