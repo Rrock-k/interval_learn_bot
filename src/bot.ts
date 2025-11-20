@@ -18,7 +18,7 @@ const ACTIONS = {
   rejectUser: 'reject_user',
 } as const;
 
-const SUPPORTED_CHAT_TYPES = new Set(['private']);
+const SUPPORTED_MESSAGE_SOURCE_TYPES = new Set(['private']);
 
 interface ParsedMessageInfo {
   contentType: string;
@@ -162,8 +162,23 @@ export const createBot = (store: CardStore) => {
   });
 
   bot.start(async (ctx) => {
+    const payload = ctx.payload; // /start <payload>
+    if (payload === 'webapp') {
+      const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
+      const protocol = domain.includes('localhost') ? 'http://' : 'https://';
+      const webAppUrl = `${protocol}${domain}/miniapp`;
+      
+      await ctx.reply(
+        '📱 Откройте приложение для управления вашими карточками:',
+        Markup.inlineKeyboard([
+          [Markup.button.webApp('� Открыть приложение', webAppUrl)],
+        ])
+      );
+      return;
+    }
+
     await ctx.reply(
-      '👋 Отправьте сообщение, фото или видео — и я предложу добавить его в интервальное обучение.',
+      '�👋 Отправьте сообщение, фото или видео — и я предложу добавить его в интервальное обучение.',
     );
   });
 
@@ -174,16 +189,42 @@ export const createBot = (store: CardStore) => {
   });
 
   bot.command('webapp', async (ctx) => {
-    const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
-    const protocol = domain.includes('localhost') ? 'http://' : 'https://';
-    const webAppUrl = `${protocol}${domain}/miniapp`;
-    
-    await ctx.reply(
-      '📱 Откройте приложение для управления вашими карточками:',
-      Markup.inlineKeyboard([
-        [Markup.button.webApp('🚀 Открыть приложение', webAppUrl)],
-      ])
-    );
+    const userId = ctx.from?.id;
+    const chatId = ctx.chat.id;
+    const chatType = ctx.chat.type;
+    logger.info(`Command /webapp received from user ${userId} in chat ${chatId} (${chatType})`);
+
+    try {
+      const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
+      const protocol = domain.includes('localhost') ? 'http://' : 'https://';
+      const webAppUrl = `${protocol}${domain}/miniapp`;
+      
+      if (chatType === 'private') {
+        await ctx.reply(
+          '📱 Откройте приложение для управления вашими карточками:',
+          Markup.inlineKeyboard([
+            [Markup.button.webApp('🚀 Открыть приложение', webAppUrl)],
+          ])
+        );
+      } else {
+        // In groups, we can't use web_app buttons. Redirect to private chat.
+        const botUsername = ctx.botInfo.username;
+        await ctx.reply(
+          '📱 Чтобы открыть приложение, перейдите в личные сообщения:',
+          Markup.inlineKeyboard([
+            [Markup.button.url('➡️ Открыть в ЛС', `https://t.me/${botUsername}?start=webapp`)],
+          ])
+        );
+      }
+      logger.info(`WebApp button sent to chat ${chatId}`);
+    } catch (error) {
+      logger.error(`Failed to send /webapp response to chat ${chatId}`, error);
+      try {
+        await ctx.reply('❌ Не удалось отправить кнопку приложения. Возможно, у меня нет прав отправлять сообщения в этот чат.');
+      } catch (innerError) {
+        logger.error(`Failed to send error message to chat ${chatId}`, innerError);
+      }
+    }
   });
 
   bot.command('use_this_chat', async (ctx) => {
@@ -215,7 +256,7 @@ export const createBot = (store: CardStore) => {
 
   bot.on('message', async (ctx) => {
     const chatType = ctx.chat?.type;
-    if (!ctx.message || !chatType || !SUPPORTED_CHAT_TYPES.has(chatType)) {
+    if (!ctx.message || !chatType || !SUPPORTED_MESSAGE_SOURCE_TYPES.has(chatType)) {
       return;
     }
 
