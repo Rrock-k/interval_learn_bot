@@ -145,70 +145,54 @@ export const createHttpServer = (
     }
     
     try {
-      logger.info('[MiniApp Auth] Manual validation of initData');
+      logger.info('[MiniApp Auth] Validating initData (Standard Decoding)');
       
-      // Parse params manually, preserving URL encoding
-      const params: Record<string, string> = {};
-      let hashValue = '';
+      const params = new URLSearchParams(initData);
+      const hash = params.get('hash');
       
-      initData.split('&').forEach(param => {
-        const equalIndex = param.indexOf('=');
-        if (equalIndex === -1) return;
-        
-        const key = param.substring(0, equalIndex);
-        const value = param.substring(equalIndex + 1);
-        
-        // Exclude hash and signature from validation data
-        if (key === 'hash') {
-          hashValue = value;
-        } else if (key !== 'signature') {
-          params[key] = value;
-        }
-      });
+      // Remove hash and signature
+      params.delete('hash');
+      params.delete('signature');
       
-      if (!hashValue) {
-        logger.warn('[MiniApp Auth] No hash in initData');
+      if (!hash) {
+        logger.warn('[MiniApp Auth] No hash provided');
         return null;
       }
       
-      // Create data check string (sorted params with URL-encoded values)
-      const dataCheckString = Object.keys(params)
-        .sort()
-        .map(key => `${key}=${params[key]}`)
+      // Sort and create data check string (DECODED values)
+      const dataCheckString = Array.from(params.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, value]) => `${key}=${value}`)
         .join('\n');
       
-      // Compute expected hash
-      const secretKey = createHmac('sha256', 'WebAppData').update(config.botToken).digest();
-      const expectedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+      const botToken = config.botToken.trim();
+      logger.info(`[MiniApp Auth] Bot token: ${botToken.substring(0, 5)}... (len: ${botToken.length})`);
+      logger.info('[MiniApp Auth] Data check string:', JSON.stringify(dataCheckString));
       
-      logger.info('[MiniApp Auth] Hash match:', expectedHash === hashValue);
+      const secretKey = createHmac('sha256', 'WebAppData').update(botToken).digest();
+      const calculatedHash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
       
-      if (expectedHash !== hashValue) {
+      logger.info(`[MiniApp Auth] Hash: ${hash} vs Calc: ${calculatedHash}`);
+      
+      if (calculatedHash !== hash) {
         logger.warn('[MiniApp Auth] Hash mismatch');
         return null;
       }
       
       // Check expiration
-      const authDate = params['auth_date'];
+      const authDate = params.get('auth_date');
       if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) {
-        logger.warn('[MiniApp Auth] Data expired or missing auth_date');
+        logger.warn('[MiniApp Auth] Data expired');
         return null;
       }
       
-      // Parse user
-      const userParam = params['user'];
-      if (!userParam) {
-        logger.warn('[MiniApp Auth] No user param');
-        return null;
-      }
+      const userParam = params.get('user');
+      if (!userParam) return null;
       
-      const user = JSON.parse(decodeURIComponent(userParam));
-      const userId = String(user.id);
-      
-      logger.info('[MiniApp Auth] Success! User ID:', userId);
-      return { userId };
+      const user = JSON.parse(userParam);
+      return { userId: String(user.id) };
     } catch (error) {
-      logger.error('[MiniApp Auth] Validation failed:', error);
+      logger.error('[MiniApp Auth] Validation error:', error);
       return null;
     }
   };
