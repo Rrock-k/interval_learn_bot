@@ -21,6 +21,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@tma.js/init-data-node": "^2.0.3",
     "cookie-parser": "^1.4.7",
     "dayjs": "^1.11.19",
     "dotenv": "^17.2.3",
