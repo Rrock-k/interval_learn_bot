@@ -146,12 +146,21 @@ export const createHttpServer = (
     logger.info('[MiniApp Auth] Validating initData, length:', initData.length);
     
     try {
-      const params = new URLSearchParams(initData);
-      const hash = params.get('hash');
+      // Parse params manually to preserve URL encoding
+      const params: Record<string, string> = {};
+      let hash = '';
       
-      // Remove hash and signature from params before validation
-      params.delete('hash');
-      params.delete('signature');
+      initData.split('&').forEach(param => {
+        const [key, value] = param.split('=');
+        if (!key) return;
+        
+        if (key === 'hash') {
+          hash = value || '';
+        } else if (key !== 'signature') {
+          // Keep URL-encoded values as-is
+          params[key] = value || '';
+        }
+      });
       
       if (!hash) {
         logger.warn('[MiniApp Auth] No hash in initData');
@@ -159,10 +168,12 @@ export const createHttpServer = (
       }
       
       logger.info('[MiniApp Auth] Hash received:', hash);
+      logger.info('[MiniApp Auth] Params to validate:', Object.keys(params));
       
-      const dataCheckString = Array.from(params.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, value]) => `${key}=${value}`)
+      // Sort and create data check string with URL-encoded values
+      const dataCheckString = Object.keys(params)
+        .sort()
+        .map(key => `${key}=${params[key]}`)
         .join('\n');
       
       logger.info('[MiniApp Auth] Data check string:', dataCheckString);
@@ -178,7 +189,7 @@ export const createHttpServer = (
         return null;
       }
       
-      const authDate = params.get('auth_date');
+      const authDate = params['auth_date'];
       if (!authDate) {
         logger.warn('[MiniApp Auth] No auth_date');
         return null;
@@ -195,15 +206,16 @@ export const createHttpServer = (
         return null;
       }
       
-      const userParam = params.get('user');
+      const userParam = params['user'];
       if (!userParam) {
         logger.warn('[MiniApp Auth] No user param');
         return null;
       }
       
-      logger.info('[MiniApp Auth] User param:', userParam);
+      logger.info('[MiniApp Auth] User param (URL-encoded):', userParam);
       
-      const user = JSON.parse(userParam);
+      // Decode user param for JSON parsing
+      const user = JSON.parse(decodeURIComponent(userParam));
       const userId = String(user.id);
       
       logger.info('[MiniApp Auth] Success! User ID:', userId);
