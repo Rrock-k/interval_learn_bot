@@ -19,22 +19,47 @@ let currentFilter = '';
 
 // API helper
 async function apiCall(endpoint, options = {}) {
+  // Debug logging
+  console.log('[API] Calling:', endpoint);
+  console.log('[API] initData exists:', !!tg.initData);
+  console.log('[API] initData length:', tg.initData?.length || 0);
+  
+  if (!tg.initData) {
+    console.error('[API] No initData available!');
+    throw new Error('Telegram initData не доступен. Откройте приложение через бота.');
+  }
+  
   const url = `${window.location.origin}${endpoint}`;
   const headers = {
     'Content-Type': 'application/json',
     'X-Telegram-Init-Data': tg.initData,
   };
   
-  const response = await fetch(url, {
-    ...options,
-    headers: { ...headers, ...options.headers },
-  });
+  console.log('[API] Request URL:', url);
+  console.log('[API] Headers:', { 'Content-Type': headers['Content-Type'], 'X-Telegram-Init-Data': 'exists' });
   
-  if (!response.ok) {
-    throw new Error(`API Error: ${response.statusText}`);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      headers: { ...headers, ...options.headers },
+    });
+    
+    console.log('[API] Response status:', response.status);
+    console.log('[API] Response ok:', response.ok);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[API] Error response:', errorText);
+      throw new Error(`API Error ${response.status}: ${errorText}`);
+    }
+    
+    const data = await response.json();
+    console.log('[API] Success:', data);
+    return data;
+  } catch (error) {
+    console.error('[API] Exception:', error);
+    throw error;
   }
-  
-  return response.json();
 }
 
 // View switching
@@ -90,6 +115,7 @@ async function loadCards() {
       <div class="empty">
         <div class="empty__icon">⚠️</div>
         <div class="empty__text">Ошибка загрузки карточек</div>
+        <div class="empty__text" style="font-size: 12px; margin-top: 8px;">${escapeHtml(error.message)}</div>
       </div>
     `;
   }
