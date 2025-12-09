@@ -134,21 +134,27 @@ export const createBot = (store: CardStore) => {
 
         // Notify Admin
         if (config.adminChatId) {
-          await ctx.telegram.sendMessage(
-            config.adminChatId,
-            `👤 <b>Новый запрос доступа</b>\n\nID: <code>${userId}</code>\nUser: @${
-              ctx.from?.username || 'N/A'
-            }\nName: ${ctx.from?.first_name} ${ctx.from?.last_name || ''}`,
-            {
-              parse_mode: 'HTML',
-              ...Markup.inlineKeyboard([
-                [
-                  Markup.button.callback('✅ Одобрить', `${ACTIONS.approveUser}|${userId}`),
-                  Markup.button.callback('❌ Отклонить', `${ACTIONS.rejectUser}|${userId}`),
-                ],
-              ]),
-            },
-          );
+          try {
+            await ctx.telegram.sendMessage(
+              config.adminChatId,
+              `👤 <b>Новый запрос доступа</b>\n\nID: <code>${userId}</code>\nUser: @${
+                ctx.from?.username || 'N/A'
+              }\nName: ${ctx.from?.first_name} ${ctx.from?.last_name || ''}`,
+              {
+                parse_mode: 'HTML',
+                ...(config.adminChatTopicId && { message_thread_id: config.adminChatTopicId }),
+                ...Markup.inlineKeyboard([
+                  [
+                    Markup.button.callback('✅ Одобрить', `${ACTIONS.approveUser}|${userId}`),
+                    Markup.button.callback('❌ Отклонить', `${ACTIONS.rejectUser}|${userId}`),
+                  ],
+                ]),
+              },
+            );
+            logger.info(`Admin notification sent to ${config.adminChatId} (topic: ${config.adminChatTopicId || 'none'})`);
+          } catch (error) {
+            logger.error(`Failed to send admin notification to ${config.adminChatId}`, error);
+          }
         }
 
         await ctx.reply(

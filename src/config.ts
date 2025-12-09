@@ -22,6 +22,7 @@ export const config = {
   databaseUrl: requireEnv('DATABASE_URL'),
   port: toNumber(process.env.PORT, 3000),
   adminChatId: process.env.ADMIN_CHAT_ID,
+  adminChatTopicId: toNumber(process.env.ADMIN_CHAT_TOPIC_ID, 0),
   initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 60),
   dashboardSecret: requireEnv('DASHBOARD_SECRET'),
   scheduler: {
