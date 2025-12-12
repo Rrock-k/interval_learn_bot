@@ -167,7 +167,7 @@ function renderCard(card) {
 // Archive card via API
 async function archiveCard(cardId) {
   try {
-    await apiCall(`/api/cards/${cardId}/status`, {
+    await apiCall(`/api/miniapp/cards/${cardId}/status`, {
       method: 'POST',
       body: JSON.stringify({ status: 'archived' })
     });

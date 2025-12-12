@@ -262,6 +262,37 @@ export const createHttpServer = (
     }
   });
 
+  app.post('/api/miniapp/cards/:id/status', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const cardId = req.params.id;
+    const status = req.body?.status as CardStatus | undefined;
+    
+    if (!cardId) {
+      res.status(400).json({ error: 'Card ID required' });
+      return;
+    }
+    
+    if (!status || !allowedStatuses.includes(status)) {
+      res.status(400).json({ error: 'Invalid status' });
+      return;
+    }
+    
+    try {
+      // Verify card belongs to user
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.userId !== userId) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
+      
+      await withDbRetry(() => store.updateStatus(cardId, status));
+      res.json({ ok: true });
+    } catch (error) {
+      logger.error('Error updating card status for Mini App', error);
+      res.status(500).json({ error: 'Failed to update status' });
+    }
+  });
+
   // Serve static files (including Mini App assets) - must be before auth middleware
   app.use(express.static(publicDir));
 
