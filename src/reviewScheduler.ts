@@ -54,6 +54,50 @@ export class ReviewScheduler {
     for (const card of dueCards) {
       await this.sendCardToChannel(card, 'scheduled');
     }
+
+    // Auto-grade overdue cards
+    await this.checkOverdueGrades();
+  }
+
+  private async checkOverdueGrades() {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 1); // 24 hours ago
+    const cutoffIso = cutoffDate.toISOString();
+
+    const overdueCards = await withDbRetry(() =>
+      this.store.listExpiredAwaitingCards(cutoffIso),
+    );
+
+    for (const card of overdueCards) {
+      try {
+        logger.info(`Auto-grading overdue card ${card.id} (awaiting since ${card.awaitingGradeSince})`);
+        
+        // Apply 'hard' grade (quality 2 in SM-2)
+        const { computeReview } = await import('./spacedRepetition');
+        const result = computeReview(card, 'hard');
+        
+        await withDbRetry(() =>
+          this.store.saveReviewResult({
+            cardId: card.id,
+            grade: result.quality,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+            interval: result.interval,
+            easiness: result.easiness,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
+
+        // Clean up pending message keyboard
+        if (card.pendingChannelId && card.pendingChannelMessageId) {
+          await this.cleanupPendingMessage(card);
+        }
+
+        logger.info(`Auto-graded card ${card.id}: next review ${result.nextReviewAt}`);
+      } catch (error) {
+        logger.error(`Failed to auto-grade card ${card.id}`, error);
+      }
+    }
   }
 
   public async triggerImmediate(cardId: string) {
