@@ -1,0 +1,30 @@
+/* Card Swipe-to-Archive Styles */
+
+/* Swipe Container */
+.card-swipe-container {
+  position: relative;
+  overflow: hidden;
+  border-radius: 16px;
+  margin-bottom: 0;
+}
+
+.card-swipe-background {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: linear-gradient(to left, #ef4444, #dc2626);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 24px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.card-swipe-background__content {
+  color: white;
+  font-weight: 600;
+  font-size: 16px;
+}

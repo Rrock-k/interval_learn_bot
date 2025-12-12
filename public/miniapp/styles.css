@@ -105,11 +105,14 @@ body {
 }
 
 .card {
+  position: relative;
   background: var(--tg-theme-secondary-bg-color);
   border-radius: 16px;
   padding: 16px;
   cursor: pointer;
-  transition: transform 0.2s;
+  transition: transform 0.2s ease;
+  touch-action: pan-y;
+  z-index: 1;
 }
 
 .card:active {

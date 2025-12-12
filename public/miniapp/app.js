@@ -109,6 +109,7 @@ async function loadCards() {
     }
     
     cardsList.innerHTML = cardsData.map(card => renderCard(card)).join('');
+    attachSwipeListeners();
   } catch (error) {
     console.error('Error loading cards:', error);
     cardsList.innerHTML = `
@@ -140,20 +141,52 @@ function renderCard(card) {
     ? new Date(card.nextReviewAt).toLocaleDateString('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
     : '—';
   
+  const isArchived = card.status === 'archived';
+  
   return `
-    <div class="card" onclick="openCard('${card.id}')">
-      <div class="card__header">
-        <span class="card__status">${statusEmoji[card.status]} ${statusName[card.status]}</span>
-        <span class="card__date">${nextReview}</span>
+    <div class="card-swipe-container" data-card-id="${card.id}" data-archived="${isArchived}">
+      <div class="card-swipe-background">
+        <div class="card-swipe-background__content">📦 Архив</div>
       </div>
-      <div class="card__content">${escapeHtml(card.contentPreview || 'Без текста')}</div>
-      <div class="card__meta">
-        <span class="card__meta-item">🔁 ${card.repetition}</span>
-        <span class="card__meta-item">📅 ${card.interval} дн.</span>
-        <span class="card__meta-item">⭐ ${card.easiness.toFixed(1)}</span>
+      <div class="card" data-card-id="${card.id}">
+        <div class="card__header">
+          <span class="card__status">${statusEmoji[card.status]} ${statusName[card.status]}</span>
+          <span class="card__date">${nextReview}</span>
+        </div>
+        <div class="card__content">${escapeHtml(card.contentPreview || 'Без текста')}</div>
+        <div class="card__meta">
+          <span class="card__meta-item">🔁 ${card.repetition}</span>
+          <span class="card__meta-item">📅 ${card.intervalDays} дн.</span>
+          <span class="card__meta-item">⭐ ${card.easiness.toFixed(1)}</span>
+        </div>
       </div>
     </div>
   `;
+}
+
+// Archive card via API
+async function archiveCard(cardId) {
+  try {
+    await apiCall(`/api/cards/${cardId}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status: 'archived' })
+    });
+    
+    // Reload cards
+    loadCards();
+  } catch (error) {
+    console.error('Failed to archive card', error);
+    tg.showAlert('Не удалось архивировать карточку');
+    loadCards(); // Reload to reset UI
+  }
+}
+
+// Attach swipe listeners using CardSwipe module
+function attachSwipeListeners() {
+  const cardsList = document.getElementById('cardsList');
+  if (window.CardSwipe) {
+    window.CardSwipe.attachSwipeListeners(cardsList, archiveCard);
+  }
 }
 
 function openCard(cardId) {
