@@ -142,6 +142,15 @@ function renderCard(card) {
     : '—';
   
   const isArchived = card.status === 'archived';
+  const actions = isArchived
+    ? `
+        <div class="card__actions">
+          <button class="card__button" data-action="restore" data-card-id="${card.id}">
+            ↩️ Вернуть в обучение
+          </button>
+        </div>
+      `
+    : '';
   
   return `
     <div class="card-swipe-container" data-card-id="${card.id}" data-archived="${isArchived}">
@@ -159,6 +168,7 @@ function renderCard(card) {
           <span class="card__meta-item">📅 ${card.intervalDays} дн.</span>
           <span class="card__meta-item">⭐ ${card.easiness.toFixed(1)}</span>
         </div>
+        ${actions}
       </div>
     </div>
   `;
@@ -178,6 +188,22 @@ async function archiveCard(cardId) {
     console.error('Failed to archive card', error);
     tg.showAlert('Не удалось архивировать карточку');
     loadCards(); // Reload to reset UI
+  }
+}
+
+// Restore card from archive via API
+async function restoreCard(cardId) {
+  try {
+    await apiCall(`/api/miniapp/cards/${cardId}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status: 'learning' })
+    });
+
+    loadCards();
+  } catch (error) {
+    console.error('Failed to restore card', error);
+    tg.showAlert('Не удалось вернуть карточку');
+    loadCards();
   }
 }
 
@@ -313,6 +339,16 @@ document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     switchView(tab.dataset.view);
   });
+});
+
+document.getElementById('cardsList').addEventListener('click', (event) => {
+  const restoreButton = event.target.closest('[data-action="restore"]');
+  if (!restoreButton) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  restoreCard(restoreButton.dataset.cardId);
 });
 
 document.getElementById('statusFilter').addEventListener('change', (e) => {
