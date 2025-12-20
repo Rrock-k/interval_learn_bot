@@ -158,6 +158,26 @@ body {
   gap: 4px;
 }
 
+.card__actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.card__button {
+  border: none;
+  background: var(--tg-theme-button-color);
+  color: var(--tg-theme-button-text-color);
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.card__button:active {
+  transform: scale(0.98);
+}
+
 /* Calendar */
 .calendar__content {
   display: flex;
