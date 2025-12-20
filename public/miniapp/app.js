@@ -142,20 +142,12 @@ function renderCard(card) {
     : '—';
   
   const isArchived = card.status === 'archived';
-  const actions = isArchived
-    ? `
-        <div class="card__actions">
-          <button class="card__button" data-action="restore" data-card-id="${card.id}">
-            ↩️ Вернуть в обучение
-          </button>
-        </div>
-      `
-    : '';
+  const swipeLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
   
   return `
     <div class="card-swipe-container" data-card-id="${card.id}" data-archived="${isArchived}">
       <div class="card-swipe-background">
-        <div class="card-swipe-background__content">📦 Архив</div>
+        <div class="card-swipe-background__content">${swipeLabel}</div>
       </div>
       <div class="card" data-card-id="${card.id}">
         <div class="card__header">
@@ -211,7 +203,7 @@ async function restoreCard(cardId) {
 function attachSwipeListeners() {
   const cardsList = document.getElementById('cardsList');
   if (window.CardSwipe) {
-    window.CardSwipe.attachSwipeListeners(cardsList, archiveCard);
+    window.CardSwipe.attachSwipeListeners(cardsList, archiveCard, restoreCard);
   }
 }
 
