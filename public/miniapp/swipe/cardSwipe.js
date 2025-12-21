@@ -64,7 +64,7 @@ function handleTouchMove(e) {
     return;
   }
   
-  // Only allow left swipe
+  // Only allow left swipe for archive or right swipe for restore
   const isArchiveSwipe = !swipeState.isArchived && deltaX < 0;
   const isRestoreSwipe = swipeState.isArchived && deltaX > 0;
   if (!isArchiveSwipe && !isRestoreSwipe) return;
