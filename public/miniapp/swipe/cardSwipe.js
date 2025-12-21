@@ -13,6 +13,9 @@ let swipeState = {
   isArchived: false,
 };
 
+// Store bound touchend handlers for each container to enable proper cleanup
+const touchEndHandlers = new WeakMap();
+
 // Touch event handlers
 function handleTouchStart(e) {
   const card = e.target.closest('.card');
@@ -132,19 +135,24 @@ function handleTouchEnd(e, onArchiveCallback, onRestoreCallback) {
 function attachSwipeListeners(containerElement, onArchiveCallback, onRestoreCallback) {
   if (!containerElement) return;
   
-  // Remove existing listeners to prevent duplicates
+  // Remove existing touchend handler if it exists
+  const existingHandler = touchEndHandlers.get(containerElement);
+  if (existingHandler) {
+    containerElement.removeEventListener('touchend', existingHandler);
+  }
+  
+  // Remove other listeners to prevent duplicates
   containerElement.removeEventListener('touchstart', handleTouchStart);
   containerElement.removeEventListener('touchmove', handleTouchMove);
-  containerElement.removeEventListener('touchend', handleTouchEnd);
+  
+  // Create and store the bound touchend handler
+  const boundTouchEndHandler = (e) => handleTouchEnd(e, onArchiveCallback, onRestoreCallback);
+  touchEndHandlers.set(containerElement, boundTouchEndHandler);
   
   // Attach new listeners
   containerElement.addEventListener('touchstart', handleTouchStart, { passive: true });
   containerElement.addEventListener('touchmove', handleTouchMove, { passive: false });
-  containerElement.addEventListener(
-    'touchend',
-    (e) => handleTouchEnd(e, onArchiveCallback, onRestoreCallback),
-    { passive: true },
-  );
+  containerElement.addEventListener('touchend', boundTouchEndHandler, { passive: true });
 }
 
 // Export for use in app.js
