@@ -101,7 +101,7 @@ function handleTouchEnd(e, onArchiveCallback, onRestoreCallback) {
         onArchiveCallback(cardId);
       }
     }, 300);
-  } else if (swipeState.isArchived && absDeltaX > 100 && deltaX > 0) {
+  } else if (swipeState.isArchived && deltaX > 100) {
     // Restore the card
     swipeState.cardElement.style.transform = 'translateX(100%)';
     swipeState.cardElement.style.opacity = '0';
