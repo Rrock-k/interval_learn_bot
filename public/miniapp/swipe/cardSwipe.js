@@ -80,7 +80,7 @@ function handleTouchEnd(e, onArchiveCallback, onRestoreCallback) {
   
   const deltaX = swipeState.currentX - swipeState.startX;
   const absDeltaX = Math.abs(deltaX);
-  const threshold = -100; // 100px swipe threshold
+  const swipeDistanceThreshold = 100; // Swipe distance threshold in pixels
   
   swipeState.cardElement.style.transition = 'transform 0.3s ease, opacity 0.3s ease';
   
@@ -90,7 +90,7 @@ function handleTouchEnd(e, onArchiveCallback, onRestoreCallback) {
     if (background) {
       background.style.opacity = '0';
     }
-  } else if (!swipeState.isArchived && deltaX < threshold) {
+  } else if (!swipeState.isArchived && deltaX < -swipeDistanceThreshold) {
     // Archive the card
     swipeState.cardElement.style.transform = 'translateX(-100%)';
     swipeState.cardElement.style.opacity = '0';
@@ -101,7 +101,7 @@ function handleTouchEnd(e, onArchiveCallback, onRestoreCallback) {
         onArchiveCallback(cardId);
       }
     }, 300);
-  } else if (swipeState.isArchived && deltaX > 100) {
+  } else if (swipeState.isArchived && deltaX > swipeDistanceThreshold) {
     // Restore the card
     swipeState.cardElement.style.transform = 'translateX(100%)';
     swipeState.cardElement.style.opacity = '0';
