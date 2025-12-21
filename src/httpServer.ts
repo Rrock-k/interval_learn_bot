@@ -240,6 +240,11 @@ export const createHttpServer = (
     const userId = (req as any).userId;
     const cardId = req.params.id;
 
+    if (!cardId) {
+      res.status(400).json({ error: 'Card ID required' });
+      return;
+    }
+
     try {
       const card = await withDbRetry(() => store.getCardById(cardId));
       if (card.userId !== userId) {
