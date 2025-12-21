@@ -160,7 +160,6 @@ function renderCard(card) {
           <span class="card__meta-item">📅 ${card.intervalDays} дн.</span>
           <span class="card__meta-item">⭐ ${card.easiness.toFixed(1)}</span>
         </div>
-        ${actions}
       </div>
     </div>
   `;
