@@ -16,6 +16,42 @@ document.documentElement.style.setProperty('--tg-theme-secondary-bg-color', tg.t
 let currentView = 'cards';
 let cardsData = [];
 let currentFilter = '';
+let currentCardId = null;
+
+const cardDetailContent = document.getElementById('cardDetailContent');
+const cardBackBtn = document.getElementById('cardBackBtn');
+const confirmOverlay = document.getElementById('confirmOverlay');
+const confirmTitle = document.getElementById('confirmTitle');
+const confirmBody = document.getElementById('confirmBody');
+const confirmCancel = document.getElementById('confirmCancel');
+const confirmConfirm = document.getElementById('confirmConfirm');
+
+const statusEmoji = {
+  pending: '⏳',
+  learning: '📖',
+  awaiting_grade: '⏱️',
+  archived: '📦',
+};
+
+const statusName = {
+  pending: 'Ожидает',
+  learning: 'Изучается',
+  awaiting_grade: 'Ждёт оценки',
+  archived: 'Архив',
+};
+
+const gradeLabelByValue = {
+  0: 'Снова',
+  3: 'Сложно',
+  4: 'Хорошо',
+  5: 'Легко',
+};
+
+const notificationReasonLabel = {
+  scheduled: 'по расписанию',
+  manual_now: 'вручную',
+  manual_override: 'дата вручную',
+};
 
 // API helper
 async function apiCall(endpoint, options = {}) {
@@ -65,10 +101,14 @@ async function apiCall(endpoint, options = {}) {
 // View switching
 function switchView(viewName) {
   currentView = viewName;
+  const activeTabView = viewName === 'card-detail' ? 'cards' : viewName;
+  if (viewName !== 'card-detail') {
+    currentCardId = null;
+  }
   
   // Update tabs
   document.querySelectorAll('.tab').forEach(tab => {
-    const isActive = tab.dataset.view === viewName;
+    const isActive = tab.dataset.view === activeTabView;
     tab.classList.toggle('tab--active', isActive);
   });
   
@@ -123,26 +163,14 @@ async function loadCards() {
 }
 
 function renderCard(card) {
-  const statusEmoji = {
-    pending: '⏳',
-    learning: '📖',
-    awaiting_grade: '⏱️',
-    archived: '📦',
-  };
-  
-  const statusName = {
-    pending: 'Ожидает',
-    learning: 'Изучается',
-    awaiting_grade: 'Ждёт оценки',
-    archived: 'Архив',
-  };
-  
   const nextReview = card.nextReviewAt 
     ? new Date(card.nextReviewAt).toLocaleDateString('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
     : '—';
   
   const isArchived = card.status === 'archived';
   const swipeLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
+  const intervalDays = card.interval ?? card.intervalDays ?? 0;
+  const easinessValue = Number.isFinite(card.easiness) ? card.easiness.toFixed(1) : '—';
   
   return `
     <div class="card-swipe-container" data-card-id="${card.id}" data-archived="${isArchived}">
@@ -157,24 +185,285 @@ function renderCard(card) {
         <div class="card__content">${escapeHtml(card.contentPreview || 'Без текста')}</div>
         <div class="card__meta">
           <span class="card__meta-item">🔁 ${card.repetition}</span>
-          <span class="card__meta-item">📅 ${card.intervalDays} дн.</span>
-          <span class="card__meta-item">⭐ ${card.easiness.toFixed(1)}</span>
+          <span class="card__meta-item">📅 ${intervalDays} дн.</span>
+          <span class="card__meta-item">⭐ ${easinessValue}</span>
         </div>
       </div>
     </div>
   `;
 }
 
+const formatDateTime = (iso) => {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('ru', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const formatValue = (value) => {
+  if (value === null || value === undefined || value === '') {
+    return '—';
+  }
+  return String(value);
+};
+
+const getMessageLink = (card) => {
+  if (!card?.sourceChatId || !card?.sourceMessageId) return null;
+  const chatId = String(card.sourceChatId);
+  const messageId = card.sourceMessageId;
+
+  if (chatId.startsWith('-100')) {
+    const internalId = chatId.slice(4);
+    return `https://t.me/c/${internalId}/${messageId}`;
+  }
+
+  if (chatId.startsWith('-')) {
+    return null;
+  }
+
+  return `tg://openmessage?user_id=${chatId}&message_id=${messageId}`;
+};
+
+const openTelegramLink = (url) => {
+  if (!url) return;
+  if (typeof tg.openTelegramLink === 'function') {
+    tg.openTelegramLink(url);
+    return;
+  }
+  window.location.href = url;
+};
+
+const showConfirmDialog = ({ title, body, confirmLabel, cancelLabel, confirmTone = 'primary' }) =>
+  new Promise((resolve) => {
+    if (!confirmOverlay || !confirmTitle || !confirmBody || !confirmConfirm || !confirmCancel) {
+      resolve(false);
+      return;
+    }
+
+    confirmTitle.textContent = title;
+    confirmBody.textContent = body;
+    confirmConfirm.textContent = confirmLabel || 'Подтвердить';
+    confirmCancel.textContent = cancelLabel || 'Отмена';
+    confirmConfirm.classList.remove('primary-button', 'danger-button');
+    confirmConfirm.classList.add(confirmTone === 'danger' ? 'danger-button' : 'primary-button');
+
+    confirmOverlay.classList.remove('is-hidden');
+    confirmOverlay.setAttribute('aria-hidden', 'false');
+
+    const cleanup = (result) => {
+      confirmOverlay.classList.add('is-hidden');
+      confirmOverlay.setAttribute('aria-hidden', 'true');
+      confirmOverlay.removeEventListener('click', handleOverlayClick);
+      confirmCancel.removeEventListener('click', handleCancel);
+      confirmConfirm.removeEventListener('click', handleConfirm);
+      resolve(result);
+    };
+
+    const handleCancel = () => cleanup(false);
+    const handleConfirm = () => cleanup(true);
+    const handleOverlayClick = (event) => {
+      if (event.target === confirmOverlay) {
+        cleanup(false);
+      }
+    };
+
+    confirmCancel.addEventListener('click', handleCancel);
+    confirmConfirm.addEventListener('click', handleConfirm);
+    confirmOverlay.addEventListener('click', handleOverlayClick);
+  });
+
+const updateCardStatus = async (cardId, status) => {
+  await apiCall(`/api/miniapp/cards/${cardId}/status`, {
+    method: 'POST',
+    body: JSON.stringify({ status }),
+  });
+
+  const updatedAt = new Date().toISOString();
+  cardsData = cardsData.map((card) =>
+    card.id === cardId ? { ...card, status, updatedAt } : card,
+  );
+};
+
+const requestArchiveChange = async (cardId, isArchived) => {
+  const confirm = await showConfirmDialog({
+    title: isArchived ? 'Разархивировать карточку?' : 'Архивировать карточку?',
+    body: isArchived
+      ? 'Карточка вернётся в активные.'
+      : 'Карточка исчезнет из активных списков.',
+    confirmLabel: isArchived ? 'Разархивировать' : 'Архивировать',
+    cancelLabel: 'Отмена',
+    confirmTone: isArchived ? 'primary' : 'danger',
+  });
+
+  if (!confirm) {
+    return false;
+  }
+
+  const status = isArchived ? 'learning' : 'archived';
+  await updateCardStatus(cardId, status);
+  return true;
+};
+
+const buildHistoryItems = (card) => {
+  const items = [];
+
+  if (card.createdAt) {
+    items.push({ title: 'Создана', date: card.createdAt });
+  }
+
+  if (card.lastNotificationAt) {
+    const reason = notificationReasonLabel[card.lastNotificationReason] || null;
+    items.push({
+      title: 'Напоминание отправлено',
+      date: card.lastNotificationAt,
+      detail: reason ? `(${reason})` : null,
+    });
+  }
+
+  if (card.awaitingGradeSince) {
+    items.push({ title: 'Ожидание оценки', date: card.awaitingGradeSince });
+  }
+
+  if (card.lastReviewedAt) {
+    const gradeLabel =
+      gradeLabelByValue[card.lastGrade] || (card.lastGrade !== null ? `Оценка ${card.lastGrade}` : null);
+    items.push({
+      title: 'Оценка',
+      date: card.lastReviewedAt,
+      detail: gradeLabel,
+    });
+  }
+
+  if (card.status === 'archived' && card.updatedAt) {
+    items.push({ title: 'Архивирована', date: card.updatedAt });
+  }
+
+  return items
+    .filter((item) => item.date)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+};
+
+const renderHistory = (card) => {
+  const items = buildHistoryItems(card);
+  if (!items.length) {
+    return '<div class="history-empty">Пока нет событий.</div>';
+  }
+  return `
+    <ul class="history-list">
+      ${items
+        .map(
+          (item) => `
+        <li>
+          <div class="history-item__title">${escapeHtml(item.title)}</div>
+          <div class="history-item__meta">
+            ${escapeHtml(formatDateTime(item.date))}${item.detail ? ` • ${escapeHtml(item.detail)}` : ''}
+          </div>
+        </li>
+      `,
+        )
+        .join('')}
+    </ul>
+  `;
+};
+
+const renderPreview = (card) => {
+  const previewText = escapeHtml(card.contentPreview || 'Без текста');
+  if (card.contentType === 'photo' && card.contentFileId) {
+    return `
+      <img src="/api/miniapp/cards/${card.id}/media" alt="Фото" class="card-detail__media media-preview" loading="lazy" />
+      <div class="card-detail__preview-text">${previewText}</div>
+    `;
+  }
+  if (card.contentType === 'video' && card.contentFileId) {
+    return `
+      <video src="/api/miniapp/cards/${card.id}/media" class="card-detail__media media-preview" controls preload="metadata"></video>
+      <div class="card-detail__preview-text">${previewText}</div>
+    `;
+  }
+  return `<div class="card-detail__preview-text">${previewText}</div>`;
+};
+
+const renderAdditionalDetails = (card) => {
+  const intervalDays = card.interval ?? card.intervalDays ?? null;
+  const detailRows = [
+    ['След. повторение', formatDateTime(card.nextReviewAt)],
+    ['Интервал', intervalDays !== null ? `${intervalDays} дн.` : '—'],
+    ['Повторы', formatValue(card.repetition)],
+    ['Лёгкость', Number.isFinite(card.easiness) ? card.easiness.toFixed(2) : '—'],
+    ['Последняя оценка', gradeLabelByValue[card.lastGrade] || formatValue(card.lastGrade)],
+    ['Создана', formatDateTime(card.createdAt)],
+    ['Обновлена', formatDateTime(card.updatedAt)],
+    ['ID карточки', formatValue(card.id)],
+    ['Чат', formatValue(card.sourceChatId)],
+    ['Сообщение', formatValue(card.sourceMessageId)],
+  ];
+
+  return `
+    <div class="detail-grid">
+      ${detailRows
+        .map(
+          ([label, value]) => `
+        <div class="detail-row">
+          <span class="detail-label">${escapeHtml(label)}</span>
+          <span class="detail-value">${escapeHtml(String(value))}</span>
+        </div>
+      `,
+        )
+        .join('')}
+    </div>
+  `;
+};
+
+const renderCardDetail = (card) => {
+  if (!cardDetailContent) return;
+  const statusText = `${statusEmoji[card.status] ?? ''} ${statusName[card.status] ?? card.status}`.trim();
+  const nextReview = formatDateTime(card.nextReviewAt);
+  const isArchived = card.status === 'archived';
+  const actionLabel = isArchived ? 'Разархивировать' : 'Архивировать';
+  const actionTone = isArchived ? 'secondary-button' : 'danger-button';
+
+  cardDetailContent.innerHTML = `
+    <div class="card-detail__header">
+      <span class="status-pill">${escapeHtml(statusText)}</span>
+      <span class="card-detail__next">След. повтор: ${escapeHtml(nextReview)}</span>
+    </div>
+    <div class="card-detail__preview">
+      ${renderPreview(card)}
+    </div>
+    <div class="detail-actions">
+      <button class="primary-button" type="button" data-action="open-message">
+        Перейти к карточке
+      </button>
+      <button class="${actionTone}" type="button" data-action="toggle-archive">
+        ${actionLabel}
+      </button>
+    </div>
+    <details class="detail-disclosure">
+      <summary>История</summary>
+      ${renderHistory(card)}
+    </details>
+    <details class="detail-disclosure">
+      <summary>Дополнительно</summary>
+      ${renderAdditionalDetails(card)}
+    </details>
+  `;
+};
+
 // Archive card via API
 async function archiveCard(cardId) {
   try {
-    await apiCall(`/api/miniapp/cards/${cardId}/status`, {
-      method: 'POST',
-      body: JSON.stringify({ status: 'archived' })
-    });
-    
-    // Reload cards
-    loadCards();
+    const card = cardsData.find((item) => item.id === cardId);
+    const isArchived = card ? card.status === 'archived' : false;
+    const updated = await requestArchiveChange(cardId, isArchived);
+    if (updated) {
+      loadCards();
+    } else {
+      loadCards(); // reset swipe state if canceled
+    }
   } catch (error) {
     console.error('Failed to archive card', error);
     tg.showAlert('Не удалось архивировать карточку');
@@ -185,12 +474,14 @@ async function archiveCard(cardId) {
 // Restore card from archive via API
 async function restoreCard(cardId) {
   try {
-    await apiCall(`/api/miniapp/cards/${cardId}/status`, {
-      method: 'POST',
-      body: JSON.stringify({ status: 'learning' })
-    });
-
-    loadCards();
+    const card = cardsData.find((item) => item.id === cardId);
+    const isArchived = card ? card.status === 'archived' : true;
+    const updated = await requestArchiveChange(cardId, isArchived);
+    if (updated) {
+      loadCards();
+    } else {
+      loadCards();
+    }
   } catch (error) {
     console.error('Failed to restore card', error);
     tg.showAlert('Не удалось вернуть карточку');
@@ -206,11 +497,23 @@ function attachSwipeListeners() {
   }
 }
 
-function openCard(cardId) {
+function openCardDetail(cardId) {
   const card = cardsData.find(c => c.id === cardId);
+  if (!card) {
+    tg.showAlert('Карточка не найдена. Попробуйте обновить список.');
+    return;
+  }
+
+  currentCardId = cardId;
+  renderCardDetail(card);
+  switchView('card-detail');
+}
+
+function refreshCardDetail() {
+  if (!currentCardId) return;
+  const card = cardsData.find((item) => item.id === currentCardId);
   if (!card) return;
-  
-  tg.showAlert(`Карточка: ${card.contentPreview}\n\nСледующее повторение: ${card.nextReviewAt || 'не запланировано'}`);
+  renderCardDetail(card);
 }
 
 // Calendar view
@@ -332,15 +635,81 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
-document.getElementById('cardsList').addEventListener('click', (event) => {
+const cardsListElement = document.getElementById('cardsList');
+cardsListElement.addEventListener('click', (event) => {
   const restoreButton = event.target.closest('[data-action="restore"]');
-  if (!restoreButton) {
+  if (restoreButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    restoreCard(restoreButton.dataset.cardId);
     return;
   }
-  event.preventDefault();
-  event.stopPropagation();
-  restoreCard(restoreButton.dataset.cardId);
+
+  const cardElement = event.target.closest('.card');
+  if (!cardElement || !cardElement.dataset.cardId) {
+    return;
+  }
+  openCardDetail(cardElement.dataset.cardId);
 });
+
+if (cardBackBtn) {
+  cardBackBtn.addEventListener('click', () => switchView('cards'));
+}
+
+if (cardDetailContent) {
+  cardDetailContent.addEventListener('click', async (event) => {
+    const actionButton = event.target.closest('[data-action]');
+    if (!actionButton) return;
+    if (!currentCardId) return;
+
+    const card = cardsData.find((item) => item.id === currentCardId);
+    if (!card) return;
+
+    if (actionButton.dataset.action === 'open-message') {
+      const link = getMessageLink(card);
+      if (!link) {
+        tg.showAlert('Не удалось сформировать ссылку на сообщение.');
+        return;
+      }
+      openTelegramLink(link);
+      return;
+    }
+
+    if (actionButton.dataset.action === 'toggle-archive') {
+      try {
+        const updated = await requestArchiveChange(card.id, card.status === 'archived');
+        if (updated) {
+          refreshCardDetail();
+        }
+      } catch (error) {
+        console.error('Failed to update card status', error);
+        tg.showAlert('Не удалось обновить карточку');
+      }
+    }
+  });
+}
+
+document.addEventListener(
+  'error',
+  (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLImageElement || target instanceof HTMLVideoElement)) {
+      return;
+    }
+    if (!target.classList.contains('media-preview')) {
+      return;
+    }
+    const wrapper = target.closest('.card-detail__preview');
+    target.remove();
+    if (wrapper && !wrapper.querySelector('.media-error')) {
+      const note = document.createElement('div');
+      note.className = 'card-detail__preview-text media-error';
+      note.textContent = 'Медиа недоступно для предпросмотра.';
+      wrapper.appendChild(note);
+    }
+  },
+  true,
+);
 
 document.getElementById('statusFilter').addEventListener('change', (e) => {
   currentFilter = e.target.value;

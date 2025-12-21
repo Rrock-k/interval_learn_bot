@@ -236,6 +236,42 @@ export const createHttpServer = (
     }
   });
 
+  app.get('/api/miniapp/cards/:id/media', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const cardId = req.params.id;
+
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.userId !== userId) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
+      if (!card.contentFileId) {
+        res.status(404).json({ error: 'Нет медиа для этой карточки' });
+        return;
+      }
+      const link = await bot.telegram.getFileLink(card.contentFileId);
+      const tgResponse = await fetch(link);
+      if (!tgResponse.ok || !tgResponse.body) {
+        res.status(502).json({ error: 'Не удалось получить медиа' });
+        return;
+      }
+      res.setHeader(
+        'Content-Type',
+        tgResponse.headers.get('content-type') ?? 'application/octet-stream',
+      );
+      res.setHeader('Cache-Control', 'private, max-age=60');
+      Readable.fromWeb(tgResponse.body).pipe(res);
+    } catch (error) {
+      logger.error('Ошибка выдачи медиа (Mini App)', error);
+      if (isFileTooBigError(error)) {
+        res.status(413).json({ error: 'Файл слишком большой для предпросмотра' });
+        return;
+      }
+      res.status(500).json({ error: 'Не удалось загрузить медиа' });
+    }
+  });
+
   app.get('/api/miniapp/stats', requireMiniAppAuth, async (req, res) => {
     const userId = (req as any).userId;
     

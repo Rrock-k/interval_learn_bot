@@ -39,6 +39,16 @@
         </div>
       </div>
 
+      <!-- Card Detail View -->
+      <div class="view" data-view="card-detail">
+        <div class="card-detail">
+          <div class="card-detail__nav">
+            <button class="back-button" id="cardBackBtn" type="button">← Назад</button>
+          </div>
+          <div id="cardDetailContent"></div>
+        </div>
+      </div>
+
       <!-- Calendar View -->
       <div class="view" data-view="calendar">
         <div class="calendar">
@@ -55,6 +65,17 @@
         </div>
       </div>
     </main>
+  </div>
+
+  <div class="confirm-overlay is-hidden" id="confirmOverlay" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="confirm-card" role="document">
+      <h2 class="confirm-title" id="confirmTitle"></h2>
+      <p class="confirm-body" id="confirmBody"></p>
+      <div class="confirm-actions">
+        <button class="secondary-button" id="confirmCancel" type="button">Отмена</button>
+        <button class="primary-button" id="confirmConfirm" type="button">Подтвердить</button>
+      </div>
+    </div>
   </div>
 
   <script src="/miniapp/swipe/cardSwipe.js"></script>
