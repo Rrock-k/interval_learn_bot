@@ -195,7 +195,7 @@ async function restoreCard(cardId) {
   } catch (error) {
     console.error('Failed to restore card', error);
     tg.showAlert('Не удалось вернуть карточку');
-    loadCards();
+    loadCards(); // Reload to reset UI
   }
 }
 
