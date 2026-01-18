@@ -28,6 +28,7 @@ export const cards = pgTable(
     userId: text('user_id').notNull(),
     sourceChatId: text('source_chat_id').notNull(),
     sourceMessageId: integer('source_message_id').notNull(),
+    sourceMessageIds: text('source_message_ids'),
     contentType: text('content_type').notNull(),
     contentPreview: text('content_preview'),
     contentFileId: text('content_file_id'),

@@ -126,9 +126,40 @@ export class ReviewScheduler {
       const targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
 
       const keyboard = buildGradeKeyboard(card.id);
-      let messageId: number;
+      let pendingMessageId: number;
       let wasCopied = false;
       const copyOriginal = async () => {
+        const sourceIds = (card.sourceMessageIds || [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id));
+        const uniqueIds = Array.from(new Set(sourceIds)).sort((a, b) => a - b);
+        if (uniqueIds.length > 1) {
+          const copies = await this.bot.telegram.copyMessages(
+            targetChatId,
+            card.sourceChatId,
+            uniqueIds,
+          );
+          const lastCopiedId = copies[copies.length - 1]?.message_id;
+          if (!lastCopiedId) {
+            throw new Error(`Не удалось скопировать медиагруппу карточки ${card.id}`);
+          }
+          card.baseChannelMessageId = lastCopiedId;
+          await withDbRetry(() =>
+            this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
+          );
+          const prompt = await this.bot.telegram.sendMessage(
+            targetChatId,
+            '🔔 Время повторить запись',
+            {
+              reply_markup: keyboard.reply_markup,
+              reply_parameters: {
+                message_id: lastCopiedId,
+                allow_sending_without_reply: true,
+              },
+            },
+          );
+          return prompt.message_id;
+        }
         const response = await this.bot.telegram.copyMessage(
           targetChatId,
           card.sourceChatId,
@@ -145,7 +176,7 @@ export class ReviewScheduler {
       };
 
       if (!card.baseChannelMessageId) {
-        messageId = await copyOriginal();
+        pendingMessageId = await copyOriginal();
         wasCopied = true;
       } else {
         try {
@@ -162,10 +193,10 @@ export class ReviewScheduler {
           );
           if (!reminder.reply_to_message) {
             await this.deleteMessageSafe(reminder.chat.id, reminder.message_id);
-            messageId = await copyOriginal();
+            pendingMessageId = await copyOriginal();
             wasCopied = true;
           } else {
-            messageId = reminder.message_id;
+            pendingMessageId = reminder.message_id;
           }
         } catch (err) {
           if (this.isMissingReplyTarget(err)) {
@@ -173,7 +204,7 @@ export class ReviewScheduler {
               `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
             );
             await withDbRetry(() => this.store.setBaseChannelMessage(card.id, null));
-            messageId = await copyOriginal();
+            pendingMessageId = await copyOriginal();
             wasCopied = true;
           } else {
             throw err;
@@ -185,14 +216,14 @@ export class ReviewScheduler {
         this.store.markAwaitingGrade({
           cardId: card.id,
           channelId: targetChatId,
-          channelMessageId: messageId,
+          channelMessageId: pendingMessageId,
           pendingSince: new Date().toISOString(),
         }),
       );
       await withDbRetry(() =>
         this.store.recordNotification({
           cardId: card.id,
-          messageId,
+          messageId: pendingMessageId,
           reason,
           sentAt: new Date().toISOString(),
         }),

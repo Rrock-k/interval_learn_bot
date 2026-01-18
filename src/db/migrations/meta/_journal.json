@@ -15,6 +15,13 @@
       "when": 1763593938437,
       "tag": "0001_thin_norrin_radd",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1768763322280,
+      "tag": "0002_add_source_message_ids",
+      "breakpoints": true
     }
   ]
 }

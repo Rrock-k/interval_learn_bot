@@ -9,6 +9,7 @@ import { computeInitialReviewDate, computeReview, GradeKey } from './spacedRepet
 import { withDbRetry } from './utils/dbRetry';
 
 type TelegrafContext = Context<Update>;
+type ReplyFn = (text: string, extra?: Parameters<TelegrafContext['reply']>[1]) => Promise<unknown>;
 
 const ACTIONS = {
   confirm: 'confirm',
@@ -19,12 +20,21 @@ const ACTIONS = {
 } as const;
 
 const SUPPORTED_MESSAGE_SOURCE_TYPES = new Set(['private']);
+const MEDIA_GROUP_DEBOUNCE_MS = 700;
+const MEDIA_GROUP_TTL_MS = 30_000;
 
 interface ParsedMessageInfo {
   contentType: string;
   preview: string | null;
   fileId: string | null;
   fileUniqueId: string | null;
+}
+
+interface MediaGroupBuffer {
+  chatId: number | string;
+  userId: number;
+  messages: Message[];
+  timer: NodeJS.Timeout | null;
 }
 
 const isCommandText = (text?: string | null) =>
@@ -64,11 +74,132 @@ const parseMessage = (message: Message): ParsedMessageInfo | null => {
   return null;
 };
 
+const buildMediaGroupKey = (chatId: number | string, mediaGroupId: string) =>
+  `${chatId}:${mediaGroupId}`;
+
+const selectMediaGroupMessage = (messages: Message[]) => {
+  const withCaption = messages.find(
+    (message) => 'caption' in message && message.caption?.trim(),
+  );
+  if (withCaption) {
+    return withCaption;
+  }
+  let selected = messages[0]!;
+  for (const message of messages) {
+    if (message.message_id < selected.message_id) {
+      selected = message;
+    }
+  }
+  return selected;
+};
+
+const countMediaGroupItems = (messages: Message[]) => {
+  let photoCount = 0;
+  let videoCount = 0;
+  for (const message of messages) {
+    if ('photo' in message && message.photo?.length) {
+      photoCount += 1;
+      continue;
+    }
+    if ('video' in message && message.video) {
+      videoCount += 1;
+    }
+  }
+  return {
+    photoCount,
+    videoCount,
+    total: photoCount + videoCount,
+  };
+};
+
+const buildMediaGroupFallbackPreview = (counts: {
+  photoCount: number;
+  videoCount: number;
+  total: number;
+}) => {
+  if (counts.photoCount && !counts.videoCount) {
+    return `[Фото x${counts.photoCount}]`;
+  }
+  if (counts.videoCount && !counts.photoCount) {
+    return `[Видео x${counts.videoCount}]`;
+  }
+  return `[Медиа x${counts.total}]`;
+};
+
+const parseMediaGroup = (messages: Message[]): ParsedMessageInfo | null => {
+  if (!messages.length) {
+    return null;
+  }
+  const primary = selectMediaGroupMessage(messages);
+  const parsed = parseMessage(primary);
+  if (!parsed) {
+    return null;
+  }
+  const counts = countMediaGroupItems(messages);
+  if (counts.total > 1) {
+    if (!parsed.preview || parsed.preview === '[Фото]' || parsed.preview === '[Видео]') {
+      parsed.preview = buildMediaGroupFallbackPreview(counts);
+    }
+  }
+  return parsed;
+};
+
+const extractMediaGroupMessageIds = (messages: Message[]) => {
+  const unique = new Set<number>();
+  for (const message of messages) {
+    unique.add(message.message_id);
+  }
+  return Array.from(unique).sort((a, b) => a - b);
+};
+
 const buildAddKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
     [Markup.button.callback('Отмена', `${ACTIONS.cancel}|${cardId}`)],
   ]);
+
+const createPendingCardAndPrompt = async ({
+  store,
+  userId,
+  chatId,
+  sourceMessageId,
+  sourceMessageIds,
+  parsed,
+  reply,
+}: {
+  store: CardStore;
+  userId: number;
+  chatId: number | string;
+  sourceMessageId: number;
+  sourceMessageIds?: number[] | null;
+  parsed: ParsedMessageInfo;
+  reply: ReplyFn;
+}) => {
+  const cardId = uuid();
+  try {
+    const pendingInput = {
+      id: cardId,
+      userId: `${userId}`,
+      sourceChatId: `${chatId}`,
+      sourceMessageId,
+      ...(sourceMessageIds === undefined ? {} : { sourceMessageIds }),
+      contentType: parsed.contentType,
+      contentPreview: parsed.preview,
+      contentFileId: parsed.fileId,
+      contentFileUniqueId: parsed.fileUniqueId,
+    };
+    await withDbRetry(() => store.createPendingCard(pendingInput));
+  } catch (error) {
+    logger.error('Не удалось создать карточку', error);
+    await reply('Ошибка сохранения (код: E_DB_WRITE). Попробуйте ещё раз.');
+    return;
+  }
+
+  await reply(
+    'Добавить это в интервальное обучение?',
+    buildAddKeyboard(cardId),
+  );
+};
 
 const tryRemoveKeyboard = async (ctx: TelegrafContext) => {
   try {
@@ -106,6 +237,71 @@ const getDeepLinkKeyboard = (botUsername: string) =>
 
 export const createBot = (store: CardStore) => {
   const bot = new Telegraf<TelegrafContext>(config.botToken);
+  const mediaGroupBuffers = new Map<string, MediaGroupBuffer>();
+  const processedMediaGroups = new Map<string, number>();
+
+  const isMediaGroupProcessed = (key: string) => {
+    const processedAt = processedMediaGroups.get(key);
+    if (!processedAt) {
+      return false;
+    }
+    const now = Date.now();
+    if (now - processedAt > MEDIA_GROUP_TTL_MS) {
+      processedMediaGroups.delete(key);
+      return false;
+    }
+    return true;
+  };
+
+  const markMediaGroupProcessed = (key: string) => {
+    const now = Date.now();
+    processedMediaGroups.set(key, now);
+    if (processedMediaGroups.size > 200) {
+      for (const [groupKey, timestamp] of processedMediaGroups) {
+        if (now - timestamp > MEDIA_GROUP_TTL_MS) {
+          processedMediaGroups.delete(groupKey);
+        }
+      }
+    }
+  };
+
+  const handleMediaGroup = async (entry: MediaGroupBuffer) => {
+    try {
+      const parsed = parseMediaGroup(entry.messages);
+      if (!parsed) {
+        await bot.telegram.sendMessage(
+          entry.chatId,
+          '😔 Пока поддерживаются только текст, фото и видео. Код ошибки: E_UNSUPPORTED_CONTENT',
+        );
+        return;
+      }
+      const representative = selectMediaGroupMessage(entry.messages);
+      const messageIds = extractMediaGroupMessageIds(entry.messages);
+      await createPendingCardAndPrompt({
+        store,
+        userId: entry.userId,
+        chatId: entry.chatId,
+        sourceMessageId: representative.message_id,
+        sourceMessageIds: messageIds.length > 1 ? messageIds : null,
+        parsed,
+        reply: (text, extra) => bot.telegram.sendMessage(entry.chatId, text, extra),
+      });
+    } catch (error) {
+      logger.error('Не удалось обработать медиагруппу', error);
+    }
+  };
+
+  const scheduleMediaGroupProcessing = (key: string, entry: MediaGroupBuffer) => {
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+    }
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      mediaGroupBuffers.delete(key);
+      markMediaGroupProcessed(key);
+      void handleMediaGroup(entry);
+    }, MEDIA_GROUP_DEBOUNCE_MS);
+  };
 
   // Authorization Middleware
   bot.use(async (ctx, next) => {
@@ -277,6 +473,29 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
+    const mediaGroupId = (ctx.message as Message & { media_group_id?: string }).media_group_id;
+    if (mediaGroupId) {
+      const key = buildMediaGroupKey(ctx.chat.id, mediaGroupId);
+      if (isMediaGroupProcessed(key)) {
+        return;
+      }
+      const existing = mediaGroupBuffers.get(key);
+      if (existing) {
+        existing.messages.push(ctx.message as Message);
+        scheduleMediaGroupProcessing(key, existing);
+        return;
+      }
+      const entry: MediaGroupBuffer = {
+        chatId: ctx.chat.id,
+        userId,
+        messages: [ctx.message as Message],
+        timer: null,
+      };
+      mediaGroupBuffers.set(key, entry);
+      scheduleMediaGroupProcessing(key, entry);
+      return;
+    }
+
     const parsed = parseMessage(ctx.message as Message);
     if (!parsed) {
       await ctx.reply(
@@ -285,30 +504,14 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
-    const cardId = uuid();
-    try {
-      await withDbRetry(() =>
-        store.createPendingCard({
-          id: cardId,
-          userId: `${userId}`,
-          sourceChatId: `${ctx.chat.id}`,
-          sourceMessageId: ctx.message.message_id,
-          contentType: parsed.contentType,
-          contentPreview: parsed.preview,
-          contentFileId: parsed.fileId,
-          contentFileUniqueId: parsed.fileUniqueId,
-        }),
-      );
-    } catch (error) {
-      logger.error('Не удалось создать карточку', error);
-      await ctx.reply('Ошибка сохранения (код: E_DB_WRITE). Попробуйте ещё раз.');
-      return;
-    }
-
-    await ctx.reply(
-      'Добавить это в интервальное обучение?',
-      buildAddKeyboard(cardId),
-    );
+    await createPendingCardAndPrompt({
+      store,
+      userId,
+      chatId: ctx.chat.id,
+      sourceMessageId: ctx.message.message_id,
+      parsed,
+      reply: (text, extra) => ctx.reply(text, extra),
+    });
   });
 
   bot.action(new RegExp(`^${ACTIONS.confirm}\\|(.+)$`), async (ctx) => {

@@ -9,6 +9,7 @@ export interface CardRecord {
   userId: string;
   sourceChatId: string;
   sourceMessageId: number;
+  sourceMessageIds: number[] | null;
   contentType: string;
   contentPreview: string | null;
   contentFileId: string | null;
@@ -36,6 +37,7 @@ export interface CreatePendingCardInput {
   userId: string;
   sourceChatId: string;
   sourceMessageId: number;
+  sourceMessageIds?: number[] | null;
   contentType: string;
   contentPreview: string | null;
   contentFileId: string | null;
@@ -75,11 +77,45 @@ export interface RecordNotificationInput {
   sentAt: string;
 }
 
+const parseSourceMessageIds = (value: unknown): number[] | null => {
+  if (!value) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    const parsed = value
+      .map((entry) => Number(entry))
+      .filter((entry) => Number.isFinite(entry));
+    return parsed.length ? parsed : null;
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        const normalized = parsed
+          .map((entry) => Number(entry))
+          .filter((entry) => Number.isFinite(entry));
+        return normalized.length ? normalized : null;
+      }
+    } catch (error) {
+      return null;
+    }
+  }
+  return null;
+};
+
+const serializeSourceMessageIds = (value?: number[] | null): string | null => {
+  if (!value || value.length === 0) {
+    return null;
+  }
+  return JSON.stringify(value);
+};
+
 const rowToCard = (row: any): CardRecord => ({
   id: row.id,
   userId: row.user_id,
   sourceChatId: row.source_chat_id,
   sourceMessageId: Number(row.source_message_id),
+  sourceMessageIds: parseSourceMessageIds(row.source_message_ids),
   contentType: row.content_type,
   contentPreview: row.content_preview,
   contentFileId: row.content_file_id,
@@ -221,7 +257,7 @@ export class CardStore {
     const { rows } = await this.pool.query(
       `
       INSERT INTO cards (
-        id, user_id, source_chat_id, source_message_id,
+        id, user_id, source_chat_id, source_message_id, source_message_ids,
         content_type, content_preview, content_file_id, content_file_unique_id, status,
         repetition, interval_days, easiness,
         next_review_at,
@@ -236,8 +272,8 @@ export class CardStore {
         last_notification_message_id,
         created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4,
-        $5, $6, $7, $8, 'pending',
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9, 'pending',
         0, 0, 2.5,
         NULL,
         NULL,
@@ -249,7 +285,7 @@ export class CardStore {
         NULL,
         NULL,
         NULL,
-        $9, $9
+        $10, $10
       )
       RETURNING *
     `,
@@ -258,6 +294,7 @@ export class CardStore {
         input.userId,
         input.sourceChatId,
         input.sourceMessageId,
+        serializeSourceMessageIds(input.sourceMessageIds),
         input.contentType,
         input.contentPreview,
         input.contentFileId,
