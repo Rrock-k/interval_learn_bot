@@ -1,4 +1,5 @@
 import dayjs from 'dayjs';
+import { config } from './config';
 import { CardRecord } from './db';
 
 export type GradeKey = 'again' | 'hard' | 'good' | 'easy';
@@ -53,6 +54,9 @@ export const computeReview = (card: CardRecord, grade: GradeKey): ReviewComputat
     const adjustment = 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02);
     easiness = clampEasiness(easiness + adjustment);
   }
+
+  const maxIntervalDays = Math.max(1, config.maxIntervalDays);
+  interval = Math.min(interval, maxIntervalDays);
 
   const nextReviewAt = now.add(interval, 'day').toISOString();
 
