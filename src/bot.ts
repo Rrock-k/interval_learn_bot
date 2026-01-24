@@ -5,7 +5,17 @@ import { v4 as uuid } from 'uuid';
 import { CardStore } from './db';
 import { config } from './config';
 import { logger } from './logger';
-import { computeInitialReviewDate, computeReview, GradeKey } from './spacedRepetition';
+import {
+  computeInitialReviewDate,
+  computeReview,
+  computeReviewWithInterval,
+  GradeKey,
+} from './spacedRepetition';
+import {
+  buildAdjustKeyboard,
+  buildReviewKeyboard,
+  REVIEW_ACTIONS,
+} from './reviewKeyboards';
 import { withDbRetry } from './utils/dbRetry';
 
 type TelegrafContext = Context<Update>;
@@ -14,7 +24,6 @@ type ReplyFn = (text: string, extra?: Parameters<TelegrafContext['reply']>[1]) =
 const ACTIONS = {
   confirm: 'confirm',
   cancel: 'cancel',
-  grade: 'grade',
   approveUser: 'approve_user',
   rejectUser: 'reject_user',
 } as const;
@@ -563,8 +572,100 @@ export const createBot = (store: CardStore) => {
     }
   });
 
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.adjust}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
+      return;
+    }
+    try {
+      await ctx.editMessageReplyMarkup(buildAdjustKeyboard(cardId).reply_markup);
+      await ctx.answerCbQuery('Выберите интервал');
+    } catch (error) {
+      logger.error('Не удалось открыть настройки интервала', error);
+      await ctx.answerCbQuery('Ошибка (E_ADJUST)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.back}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
+      return;
+    }
+    try {
+      await ctx.editMessageReplyMarkup(buildReviewKeyboard(cardId).reply_markup);
+      await ctx.answerCbQuery();
+    } catch (error) {
+      logger.error('Не удалось вернуть основную клавиатуру', error);
+      await ctx.answerCbQuery('Ошибка (E_BACK)', { show_alert: true });
+    }
+  });
+
   bot.action(
-    new RegExp(`^${ACTIONS.grade}\\|([^|]+)\\|(again|hard|good|easy)$`),
+    new RegExp(`^${REVIEW_ACTIONS.preset}\\|([^|]+)\\|(\\d+)$`),
+    async (ctx) => {
+      const cardId = ctx.match?.[1];
+      const daysRaw = ctx.match?.[2];
+      const days = daysRaw ? Number(daysRaw) : Number.NaN;
+      if (!cardId || !Number.isFinite(days)) {
+        await ctx.answerCbQuery('Некорректное действие');
+        return;
+      }
+      const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+      if (!card) {
+        await ctx.answerCbQuery('Повтор уже обработан');
+        return;
+      }
+      try {
+        const result = computeReviewWithInterval(days);
+        await withDbRetry(() =>
+          store.saveReviewResult({
+            cardId,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
+        if (card.pendingChannelId && card.pendingChannelMessageId) {
+          try {
+            await ctx.telegram.editMessageReplyMarkup(
+              card.pendingChannelId,
+              card.pendingChannelMessageId,
+              undefined,
+              undefined,
+            );
+          } catch (editError) {
+            logger.warn(
+              `Не удалось обновить сообщение канала для карточки ${card.id}`,
+              editError,
+            );
+          }
+        }
+        await ctx.answerCbQuery(
+          `Готово! Следующее повторение ${formatNextReviewMessage(result.nextReviewAt)}`,
+        );
+      } catch (error) {
+        logger.error('Ошибка обработки настройки интервала', error);
+        await ctx.answerCbQuery('Не удалось сохранить настройку (E_PRESET)', {
+          show_alert: true,
+        });
+      }
+    },
+  );
+
+  bot.action(
+    new RegExp(`^${REVIEW_ACTIONS.grade}\\|([^|]+)\\|(again|ok)$`),
     async (ctx) => {
       const cardId = ctx.match?.[1];
       const grade = ctx.match?.[2] as GradeKey | undefined;
@@ -582,11 +683,8 @@ export const createBot = (store: CardStore) => {
         await withDbRetry(() =>
           store.saveReviewResult({
             cardId,
-            grade: result.quality,
             nextReviewAt: result.nextReviewAt,
             repetition: result.repetition,
-            interval: result.interval,
-            easiness: result.easiness,
             reviewedAt: new Date().toISOString(),
           }),
         );

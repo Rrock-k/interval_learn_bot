@@ -40,13 +40,6 @@ const statusName = {
   archived: 'Архив',
 };
 
-const gradeLabelByValue = {
-  0: 'Снова',
-  3: 'Сложно',
-  4: 'Хорошо',
-  5: 'Легко',
-};
-
 const notificationReasonLabel = {
   scheduled: 'по расписанию',
   manual_now: 'вручную',
@@ -169,8 +162,7 @@ function renderCard(card) {
   
   const isArchived = card.status === 'archived';
   const swipeLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
-  const intervalDays = card.interval ?? card.intervalDays ?? 0;
-  const easinessValue = Number.isFinite(card.easiness) ? card.easiness.toFixed(1) : '—';
+  const repetitionValue = Number.isFinite(card.repetition) ? card.repetition : 0;
   
   return `
     <div class="card-swipe-container" data-card-id="${card.id}" data-archived="${isArchived}">
@@ -184,9 +176,7 @@ function renderCard(card) {
         </div>
         <div class="card__content">${escapeHtml(card.contentPreview || 'Без текста')}</div>
         <div class="card__meta">
-          <span class="card__meta-item">🔁 ${card.repetition}</span>
-          <span class="card__meta-item">📅 ${intervalDays} дн.</span>
-          <span class="card__meta-item">⭐ ${easinessValue}</span>
+          <span class="card__meta-item">🔁 ${repetitionValue}</span>
         </div>
       </div>
     </div>
@@ -329,13 +319,7 @@ const buildHistoryItems = (card) => {
   }
 
   if (card.lastReviewedAt) {
-    const gradeLabel =
-      gradeLabelByValue[card.lastGrade] || (card.lastGrade !== null ? `Оценка ${card.lastGrade}` : null);
-    items.push({
-      title: 'Оценка',
-      date: card.lastReviewedAt,
-      detail: gradeLabel,
-    });
+    items.push({ title: 'Повтор', date: card.lastReviewedAt });
   }
 
   if (card.status === 'archived' && card.updatedAt) {
@@ -388,13 +372,10 @@ const renderPreview = (card) => {
 };
 
 const renderAdditionalDetails = (card) => {
-  const intervalDays = card.interval ?? card.intervalDays ?? null;
   const detailRows = [
     ['След. повторение', formatDateTime(card.nextReviewAt)],
-    ['Интервал', intervalDays !== null ? `${intervalDays} дн.` : '—'],
     ['Повторы', formatValue(card.repetition)],
-    ['Лёгкость', Number.isFinite(card.easiness) ? card.easiness.toFixed(2) : '—'],
-    ['Последняя оценка', gradeLabelByValue[card.lastGrade] || formatValue(card.lastGrade)],
+    ['Последний повтор', formatDateTime(card.lastReviewedAt)],
     ['Создана', formatDateTime(card.createdAt)],
     ['Обновлена', formatDateTime(card.updatedAt)],
     ['ID карточки', formatValue(card.id)],

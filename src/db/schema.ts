@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, index, check } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, index, check } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable(
@@ -35,11 +35,8 @@ export const cards = pgTable(
     contentFileUniqueId: text('content_file_unique_id'),
     status: text('status').notNull(), // 'pending' | 'learning' | 'awaiting_grade' | 'archived'
     repetition: integer('repetition').notNull().default(0),
-    intervalDays: integer('interval_days').notNull().default(0),
-    easiness: real('easiness').notNull().default(2.5),
     nextReviewAt: text('next_review_at'),
     lastReviewedAt: text('last_reviewed_at'),
-    lastGrade: integer('last_grade'),
     pendingChannelId: text('pending_channel_id'),
     pendingChannelMessageId: integer('pending_channel_message_id'),
     baseChannelMessageId: integer('base_channel_message_id'),

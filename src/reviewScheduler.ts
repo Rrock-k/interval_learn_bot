@@ -1,20 +1,10 @@
 import dayjs from 'dayjs';
-import { Markup, Telegraf } from 'telegraf';
+import { Telegraf } from 'telegraf';
 import { CardRecord, CardStore, NotificationReason } from './db';
 import { config } from './config';
-import { gradeOptions } from './spacedRepetition';
+import { buildReviewKeyboard } from './reviewKeyboards';
 import { logger } from './logger';
 import { withDbRetry } from './utils/dbRetry';
-
-const buildGradeKeyboard = (cardId: string) =>
-  Markup.inlineKeyboard([
-    gradeOptions.map((option) =>
-      Markup.button.callback(
-        `${option.emoji} ${option.label}`,
-        `grade|${cardId}|${option.key}`,
-      ),
-    ),
-  ]);
 
 export class ReviewScheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -72,18 +62,14 @@ export class ReviewScheduler {
       try {
         logger.info(`Auto-grading overdue card ${card.id} (awaiting since ${card.awaitingGradeSince})`);
         
-        // Apply 'hard' grade (quality 2 in SM-2)
         const { computeReview } = await import('./spacedRepetition');
-        const result = computeReview(card, 'hard');
+        const result = computeReview(card, 'ok');
         
         await withDbRetry(() =>
           this.store.saveReviewResult({
             cardId: card.id,
-            grade: result.quality,
             nextReviewAt: result.nextReviewAt,
             repetition: result.repetition,
-            interval: result.interval,
-            easiness: result.easiness,
             reviewedAt: new Date().toISOString(),
           }),
         );
@@ -125,7 +111,7 @@ export class ReviewScheduler {
       const user = await withDbRetry(() => this.store.getUser(card.userId));
       const targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
 
-      const keyboard = buildGradeKeyboard(card.id);
+      const keyboard = buildReviewKeyboard(card.id);
       let pendingMessageId: number;
       let wasCopied = false;
       const copyOriginal = async () => {

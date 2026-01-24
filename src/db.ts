@@ -16,11 +16,8 @@ export interface CardRecord {
   contentFileUniqueId: string | null;
   status: CardStatus;
   repetition: number;
-  interval: number;
-  easiness: number;
   nextReviewAt: string | null;
   lastReviewedAt: string | null;
-  lastGrade: number | null;
   pendingChannelId: string | null;
   pendingChannelMessageId: number | null;
   baseChannelMessageId: number | null;
@@ -57,11 +54,8 @@ export interface AwaitingGradeInput {
 
 export interface ReviewResultInput {
   cardId: string;
-  grade: number;
   nextReviewAt: string;
   repetition: number;
-  interval: number;
-  easiness: number;
   reviewedAt: string;
 }
 
@@ -122,11 +116,8 @@ const rowToCard = (row: any): CardRecord => ({
   contentFileUniqueId: row.content_file_unique_id,
   status: row.status as CardStatus,
   repetition: Number(row.repetition),
-  interval: Number(row.interval_days),
-  easiness: Number(row.easiness),
   nextReviewAt: row.next_review_at,
   lastReviewedAt: row.last_reviewed_at,
-  lastGrade: row.last_grade === null ? null : Number(row.last_grade),
   pendingChannelId: row.pending_channel_id,
   pendingChannelMessageId: row.pending_channel_message_id,
   baseChannelMessageId: row.base_channel_message_id,
@@ -259,10 +250,9 @@ export class CardStore {
       INSERT INTO cards (
         id, user_id, source_chat_id, source_message_id, source_message_ids,
         content_type, content_preview, content_file_id, content_file_unique_id, status,
-        repetition, interval_days, easiness,
+        repetition,
         next_review_at,
         last_reviewed_at,
-        last_grade,
         pending_channel_id,
         pending_channel_message_id,
         base_channel_message_id,
@@ -274,8 +264,7 @@ export class CardStore {
       ) VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9, 'pending',
-        0, 0, 2.5,
-        NULL,
+        0,
         NULL,
         NULL,
         NULL,
@@ -404,23 +393,17 @@ export class CardStore {
       UPDATE cards
       SET status = 'learning',
           last_reviewed_at = $1,
-          last_grade = $2,
-          repetition = $3,
-          interval_days = $4,
-          easiness = $5,
-          next_review_at = $6,
+          repetition = $2,
+          next_review_at = $3,
           pending_channel_id = NULL,
           pending_channel_message_id = NULL,
           awaiting_grade_since = NULL,
           updated_at = $1
-      WHERE id = $7
+      WHERE id = $4
     `,
       [
         input.reviewedAt,
-        input.grade,
         input.repetition,
-        input.interval,
-        input.easiness,
         input.nextReviewAt,
         input.cardId,
       ],

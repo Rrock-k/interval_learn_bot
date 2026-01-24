@@ -2,7 +2,7 @@ import dayjs from 'dayjs';
 import { config } from './config';
 import { CardRecord } from './db';
 
-export type GradeKey = 'again' | 'hard' | 'good' | 'easy';
+export type GradeKey = 'again' | 'ok';
 
 export const gradeOptions: Array<{
   key: GradeKey;
@@ -10,60 +10,70 @@ export const gradeOptions: Array<{
   emoji: string;
 }> = [
   { key: 'again', label: 'Снова', emoji: '🔁' },
-  { key: 'hard', label: 'Сложно', emoji: '😬' },
-  { key: 'good', label: 'Хорошо', emoji: '🙂' },
-  { key: 'easy', label: 'Легко', emoji: '😎' },
+  { key: 'ok', label: 'Окей', emoji: '✅' },
 ];
 
-const gradeToQuality: Record<GradeKey, number> = {
-  again: 0,
-  hard: 3,
-  good: 4,
-  easy: 5,
-};
-
 export interface ReviewComputationResult {
-  quality: number;
-  easiness: number;
-  interval: number;
   repetition: number;
   nextReviewAt: string;
 }
 
-const clampEasiness = (value: number): number => Math.max(1.3, Number(value.toFixed(2)));
+export const reviewIntervalLadder = [1, 3, 7, 14, 30];
+export const reviewPresetIntervals = [3, 7, 14, 30];
+
+const clampInterval = (interval: number): number => {
+  const maxIntervalDays = Math.max(1, config.maxIntervalDays);
+  return Math.min(Math.max(1, interval), maxIntervalDays);
+};
+
+const intervalFromRepetition = (repetition: number): number => {
+  const index = Math.min(
+    Math.max(repetition - 1, 0),
+    reviewIntervalLadder.length - 1,
+  );
+  return reviewIntervalLadder[index] ?? 1;
+};
+
+const repetitionFromInterval = (interval: number): number => {
+  const index = reviewIntervalLadder.findIndex((value) => value >= interval);
+  if (index === -1) {
+    return reviewIntervalLadder.length;
+  }
+  return index + 1;
+};
 
 export const computeReview = (card: CardRecord, grade: GradeKey): ReviewComputationResult => {
   const now = dayjs();
-  const quality = gradeToQuality[grade];
-  let easiness = card.easiness ?? 2.5;
   let repetition = card.repetition ?? 0;
-  let interval = card.interval ?? 0;
+  let interval = 0;
 
-  if (quality < 3) {
+  if (grade === 'again') {
     repetition = 0;
     interval = 1;
   } else {
     repetition += 1;
-    if (repetition === 1) {
-      interval = 1;
-    } else if (repetition === 2) {
-      interval = 6;
-    } else {
-      interval = Math.max(1, Math.round(interval * easiness));
-    }
-    const adjustment = 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02);
-    easiness = clampEasiness(easiness + adjustment);
+    interval = intervalFromRepetition(repetition);
   }
 
-  const maxIntervalDays = Math.max(1, config.maxIntervalDays);
-  interval = Math.min(interval, maxIntervalDays);
+  interval = clampInterval(interval);
 
   const nextReviewAt = now.add(interval, 'day').toISOString();
 
   return {
-    quality,
-    easiness,
-    interval,
+    repetition,
+    nextReviewAt,
+  };
+};
+
+export const computeReviewWithInterval = (
+  intervalDays: number,
+): ReviewComputationResult => {
+  const now = dayjs();
+  const interval = clampInterval(intervalDays);
+  const repetition = repetitionFromInterval(interval);
+  const nextReviewAt = now.add(interval, 'day').toISOString();
+
+  return {
     repetition,
     nextReviewAt,
   };
