@@ -585,7 +585,13 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      await ctx.editMessageReplyMarkup(buildAdjustKeyboard(cardId).reply_markup);
+      const botUsername = ctx.botInfo?.username;
+      const deepLinkUrl = botUsername
+        ? buildMiniAppDeepLink(botUsername, buildMiniAppCardParam(cardId))
+        : undefined;
+      await ctx.editMessageReplyMarkup(
+        buildAdjustKeyboard(cardId, deepLinkUrl).reply_markup,
+      );
       await ctx.answerCbQuery('Выберите интервал');
     } catch (error) {
       logger.error('Не удалось открыть настройки интервала', error);
@@ -605,12 +611,8 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      const botUsername = ctx.botInfo?.username;
-      const deepLinkUrl = botUsername
-        ? buildMiniAppDeepLink(botUsername, buildMiniAppCardParam(cardId))
-        : undefined;
       await ctx.editMessageReplyMarkup(
-        buildReviewKeyboard(cardId, deepLinkUrl).reply_markup,
+        buildReviewKeyboard(cardId).reply_markup,
       );
       await ctx.answerCbQuery();
     } catch (error) {
