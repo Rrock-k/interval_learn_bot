@@ -18,6 +18,60 @@ let cardsData = [];
 let currentFilter = '';
 let currentCardId = null;
 
+const getStartParamRaw = () => {
+  const fromInitData = tg?.initDataUnsafe?.start_param;
+  if (fromInitData) return fromInitData;
+
+  const searchParams = new URLSearchParams(window.location.search);
+  const fromSearch = searchParams.get('tgWebAppStartParam');
+  if (fromSearch) return fromSearch;
+
+  if (window.location.hash) {
+    const hash = window.location.hash.startsWith('#')
+      ? window.location.hash.slice(1)
+      : window.location.hash;
+    const queryIndex = hash.indexOf('?');
+    if (queryIndex !== -1) {
+      const hashQuery = hash.slice(queryIndex + 1);
+      const hashParams = new URLSearchParams(hashQuery);
+      const fromHash = hashParams.get('tgWebAppStartParam');
+      if (fromHash) return fromHash;
+    }
+  }
+
+  return null;
+};
+
+const parseStartParam = () => {
+  const raw = getStartParamRaw();
+  if (!raw) return null;
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch (error) {
+    console.warn('Failed to decode start param', error);
+  }
+
+  if (decoded.startsWith('card_')) {
+    const cardId = decoded.slice('card_'.length);
+    if (cardId) {
+      return { type: 'card', cardId };
+    }
+  }
+
+  if (decoded.startsWith('view_')) {
+    const view = decoded.slice('view_'.length);
+    if (['cards', 'calendar', 'stats'].includes(view)) {
+      return { type: 'view', view };
+    }
+  }
+
+  return null;
+};
+
+const initialDeepLink = parseStartParam();
+let deepLinkHandled = false;
+
 const cardDetailContent = document.getElementById('cardDetailContent');
 const cardBackBtn = document.getElementById('cardBackBtn');
 const confirmOverlay = document.getElementById('confirmOverlay');
@@ -121,6 +175,22 @@ function switchView(viewName) {
   }
 }
 
+const handleDeepLinkAfterCardsLoad = () => {
+  if (deepLinkHandled || !initialDeepLink) return false;
+  if (initialDeepLink.type !== 'card') return false;
+
+  const targetCard = cardsData.find((card) => card.id === initialDeepLink.cardId);
+  if (!targetCard) {
+    tg.showAlert('Карточка не найдена. Возможно, она удалена или доступ ограничен.');
+    deepLinkHandled = true;
+    return true;
+  }
+
+  openCardDetail(targetCard.id);
+  deepLinkHandled = true;
+  return true;
+};
+
 // Cards view
 async function loadCards() {
   const cardsList = document.getElementById('cardsList');
@@ -130,6 +200,8 @@ async function loadCards() {
     const params = currentFilter ? `?status=${currentFilter}` : '';
     const result = await apiCall(`/api/miniapp/cards${params}`);
     cardsData = result.data || [];
+
+    handleDeepLinkAfterCardsLoad();
     
     if (cardsData.length === 0) {
       cardsList.innerHTML = `
@@ -697,5 +769,14 @@ document.getElementById('statusFilter').addEventListener('change', (e) => {
   loadCards();
 });
 
+const initialLoad = () => {
+  if (initialDeepLink?.type === 'view' && initialDeepLink.view !== 'cards') {
+    switchView(initialDeepLink.view);
+    deepLinkHandled = true;
+    return;
+  }
+  loadCards();
+};
+
 // Initial load
-loadCards();
+initialLoad();

@@ -9,16 +9,22 @@ export const REVIEW_ACTIONS = {
   back: 'review_back',
 } as const;
 
-export const buildReviewKeyboard = (cardId: string) =>
-  Markup.inlineKeyboard([
+export const buildReviewKeyboard = (cardId: string, deepLinkUrl?: string) => {
+  const rows = [
     gradeOptions.map((option) =>
       Markup.button.callback(
         `${option.emoji} ${option.label}`,
         `${REVIEW_ACTIONS.grade}|${cardId}|${option.key}`,
       ),
     ),
+    ...(deepLinkUrl
+      ? [[Markup.button.url('📱 Открыть в приложении', deepLinkUrl)]]
+      : []),
     [Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${cardId}`)],
-  ]);
+  ];
+
+  return Markup.inlineKeyboard(rows);
+};
 
 const formatPresetLabel = (days: number) => `через ${days}д`;
 

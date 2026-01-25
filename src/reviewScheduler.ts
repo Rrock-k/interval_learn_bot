@@ -4,10 +4,12 @@ import { CardRecord, CardStore, NotificationReason } from './db';
 import { config } from './config';
 import { buildReviewKeyboard } from './reviewKeyboards';
 import { logger } from './logger';
+import { buildMiniAppCardParam, buildMiniAppDeepLink } from './telegramLinks';
 import { withDbRetry } from './utils/dbRetry';
 
 export class ReviewScheduler {
   private timer: NodeJS.Timeout | null = null;
+  private botUsername: string | null = null;
 
   constructor(
     private readonly store: CardStore,
@@ -111,7 +113,8 @@ export class ReviewScheduler {
       const user = await withDbRetry(() => this.store.getUser(card.userId));
       const targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
 
-      const keyboard = buildReviewKeyboard(card.id);
+      const deepLinkUrl = await this.getCardDeepLink(card.id);
+      const keyboard = buildReviewKeyboard(card.id, deepLinkUrl ?? undefined);
       let pendingMessageId: number;
       let wasCopied = false;
       const copyOriginal = async () => {
@@ -236,6 +239,26 @@ export class ReviewScheduler {
       } catch (err) {
         logger.warn(`Не удалось очистить клавиатуру карточки ${card.id}`, err);
       }
+    }
+  }
+
+  private async getBotUsername() {
+    if (this.botUsername) {
+      return this.botUsername;
+    }
+    const me = await this.bot.telegram.getMe();
+    this.botUsername = me.username ?? null;
+    return this.botUsername;
+  }
+
+  private async getCardDeepLink(cardId: string): Promise<string | null> {
+    try {
+      const botUsername = await this.getBotUsername();
+      if (!botUsername) return null;
+      return buildMiniAppDeepLink(botUsername, buildMiniAppCardParam(cardId));
+    } catch (error) {
+      logger.warn(`Не удалось получить deep link для карточки ${cardId}`, error);
+      return null;
     }
   }
 

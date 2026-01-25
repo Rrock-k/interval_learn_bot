@@ -16,6 +16,7 @@ import {
   buildReviewKeyboard,
   REVIEW_ACTIONS,
 } from './reviewKeyboards';
+import { buildMiniAppCardParam, buildMiniAppDeepLink } from './telegramLinks';
 import { withDbRetry } from './utils/dbRetry';
 
 type TelegrafContext = Context<Update>;
@@ -604,7 +605,13 @@ export const createBot = (store: CardStore) => {
       return;
     }
     try {
-      await ctx.editMessageReplyMarkup(buildReviewKeyboard(cardId).reply_markup);
+      const botUsername = ctx.botInfo?.username;
+      const deepLinkUrl = botUsername
+        ? buildMiniAppDeepLink(botUsername, buildMiniAppCardParam(cardId))
+        : undefined;
+      await ctx.editMessageReplyMarkup(
+        buildReviewKeyboard(cardId, deepLinkUrl).reply_markup,
+      );
       await ctx.answerCbQuery();
     } catch (error) {
       logger.error('Не удалось вернуть основную клавиатуру', error);
