@@ -241,6 +241,28 @@ export class CardStore {
     `,
       [chatId, now, userId],
     );
+    // Base messages belong to the old chat — reset them so the bot
+    // re-copies originals into the new chat on next reminder.
+    await this.resetUserBaseMessages(userId);
+  }
+
+  async resetUserBaseMessages(userId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET base_channel_message_id = NULL,
+          pending_channel_id = NULL,
+          pending_channel_message_id = NULL,
+          awaiting_grade_since = NULL,
+          status = CASE WHEN status = 'awaiting_grade' THEN 'learning' ELSE status END,
+          next_review_at = CASE WHEN status = 'awaiting_grade' THEN $1 ELSE next_review_at END,
+          updated_at = $1
+      WHERE user_id = $2
+        AND status IN ('learning', 'awaiting_grade')
+    `,
+      [now, userId],
+    );
   }
 
   async createPendingCard(input: CreatePendingCardInput): Promise<CardRecord> {
