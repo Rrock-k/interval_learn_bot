@@ -541,7 +541,11 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery(
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
       );
-      await tryRemoveKeyboard(ctx);
+      try {
+        await ctx.editMessageText('✅ Добавлено в интервальное обучение');
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение', error);
+      }
     } catch (error) {
       logger.error('Не удалось активировать карточку', error);
       await ctx.answerCbQuery('Ошибка при добавлении. Код: E_ACTIVATE', {
