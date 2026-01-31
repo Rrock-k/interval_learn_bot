@@ -207,16 +207,11 @@ const createPendingCardAndPrompt = async ({
 
   await reply(
     'Добавить это в интервальное обучение?',
-    buildAddKeyboard(cardId),
+    {
+      ...buildAddKeyboard(cardId),
+      reply_parameters: { message_id: sourceMessageId },
+    },
   );
-};
-
-const tryRemoveKeyboard = async (ctx: TelegrafContext) => {
-  try {
-    await ctx.editMessageReplyMarkup(undefined);
-  } catch (error) {
-    logger.warn('Не удалось обновить клавиатуру', error);
-  }
 };
 
 const formatNextReviewMessage = (isoDate: string) => {
@@ -568,7 +563,11 @@ export const createBot = (store: CardStore) => {
       }
       await withDbRetry(() => store.deleteCard(cardId));
       await ctx.answerCbQuery('Удалено');
-      await tryRemoveKeyboard(ctx);
+      try {
+        await ctx.editMessageText('Пользователь отменил добавление');
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение', error);
+      }
     } catch (error) {
       logger.error('Не удалось удалить карточку', error);
       await ctx.answerCbQuery('Ошибка удаления (E_CANCEL)', {
