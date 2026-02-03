@@ -176,7 +176,7 @@ const buildAddKeyboard = (cardId: string, reminderMode: ReminderMode) =>
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
     [
       Markup.button.callback(
-        `⏰ Режим: ${reminderModeLabels[reminderMode]}`,
+        `Выбрать режим напоминаний`,
         `${ACTIONS.chooseReminder}|${cardId}`,
       ),
     ],
@@ -187,19 +187,19 @@ const buildReminderModeKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
     [
       Markup.button.callback(
-        `🔁 ${reminderModeLabels.sm2}`,
+        `${reminderModeLabels.sm2} (дефолт)`,
         `${ACTIONS.setReminder}|${cardId}|sm2`,
       ),
     ],
     [
       Markup.button.callback(
-        `📅 ${reminderModeLabels.daily}`,
+        reminderModeLabels.daily,
         `${ACTIONS.setReminder}|${cardId}|daily`,
       ),
     ],
     [
       Markup.button.callback(
-        `🗓️ ${reminderModeLabels.weekly}`,
+        reminderModeLabels.weekly,
         `${ACTIONS.setReminder}|${cardId}|weekly`,
       ),
     ],
