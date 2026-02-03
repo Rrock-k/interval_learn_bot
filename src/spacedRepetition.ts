@@ -1,6 +1,6 @@
 import dayjs from 'dayjs';
 import { config } from './config';
-import { CardRecord } from './db';
+import { CardRecord, ReminderMode } from './db';
 
 export type GradeKey = 'again' | 'ok';
 
@@ -44,6 +44,14 @@ const repetitionFromInterval = (interval: number): number => {
 
 export const computeReview = (card: CardRecord, grade: GradeKey): ReviewComputationResult => {
   const now = dayjs();
+  if (card.reminderMode === 'daily' || card.reminderMode === 'weekly') {
+    const interval = card.reminderMode === 'daily' ? 1 : 7;
+    const nextReviewAt = now.add(interval, 'day').toISOString();
+    return {
+      repetition: (card.repetition ?? 0) + 1,
+      nextReviewAt,
+    };
+  }
   let repetition = card.repetition ?? 0;
   let interval = 0;
 
@@ -82,4 +90,17 @@ export const computeReviewWithInterval = (
 export const computeInitialReviewDate = (minutes: number): string => {
   const safeMinutes = Math.max(1, minutes);
   return dayjs().add(safeMinutes, 'minute').toISOString();
+};
+
+export const computeInitialReviewDateForMode = (
+  reminderMode: ReminderMode,
+  minutes: number,
+): string => {
+  if (reminderMode === 'daily') {
+    return dayjs().add(1, 'day').toISOString();
+  }
+  if (reminderMode === 'weekly') {
+    return dayjs().add(7, 'day').toISOString();
+  }
+  return computeInitialReviewDate(minutes);
 };

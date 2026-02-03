@@ -2,11 +2,11 @@ import dayjs from 'dayjs';
 import { Context, Markup, Telegraf } from 'telegraf';
 import { Update, Message } from 'telegraf/typings/core/types/typegram';
 import { v4 as uuid } from 'uuid';
-import { CardStore } from './db';
+import { CardStore, ReminderMode } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import {
-  computeInitialReviewDate,
+  computeInitialReviewDateForMode,
   computeReview,
   computeReviewWithInterval,
   GradeKey,
@@ -25,9 +25,18 @@ type ReplyFn = (text: string, extra?: Parameters<TelegrafContext['reply']>[1]) =
 const ACTIONS = {
   confirm: 'confirm',
   cancel: 'cancel',
+  chooseReminder: 'choose_reminder',
+  setReminder: 'set_reminder',
+  backReminder: 'back_reminder',
   approveUser: 'approve_user',
   rejectUser: 'reject_user',
 } as const;
+
+const reminderModeLabels: Record<ReminderMode, string> = {
+  sm2: 'SM-2 интервалы',
+  daily: 'Каждый день',
+  weekly: 'Каждую неделю',
+};
 
 const SUPPORTED_MESSAGE_SOURCE_TYPES = new Set(['private']);
 const MEDIA_GROUP_DEBOUNCE_MS = 700;
@@ -162,10 +171,39 @@ const extractMediaGroupMessageIds = (messages: Message[]) => {
   return Array.from(unique).sort((a, b) => a - b);
 };
 
-const buildAddKeyboard = (cardId: string) =>
+const buildAddKeyboard = (cardId: string, reminderMode: ReminderMode) =>
   Markup.inlineKeyboard([
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
+    [
+      Markup.button.callback(
+        `⏰ Режим: ${reminderModeLabels[reminderMode]}`,
+        `${ACTIONS.chooseReminder}|${cardId}`,
+      ),
+    ],
     [Markup.button.callback('Отмена', `${ACTIONS.cancel}|${cardId}`)],
+  ]);
+
+const buildReminderModeKeyboard = (cardId: string) =>
+  Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        `🔁 ${reminderModeLabels.sm2}`,
+        `${ACTIONS.setReminder}|${cardId}|sm2`,
+      ),
+    ],
+    [
+      Markup.button.callback(
+        `📅 ${reminderModeLabels.daily}`,
+        `${ACTIONS.setReminder}|${cardId}|daily`,
+      ),
+    ],
+    [
+      Markup.button.callback(
+        `🗓️ ${reminderModeLabels.weekly}`,
+        `${ACTIONS.setReminder}|${cardId}|weekly`,
+      ),
+    ],
+    [Markup.button.callback('⬅️ Назад', `${ACTIONS.backReminder}|${cardId}`)],
   ]);
 
 const createPendingCardAndPrompt = async ({
@@ -186,6 +224,7 @@ const createPendingCardAndPrompt = async ({
   reply: ReplyFn;
 }) => {
   const cardId = uuid();
+  const reminderMode: ReminderMode = 'sm2';
   try {
     const pendingInput = {
       id: cardId,
@@ -197,6 +236,7 @@ const createPendingCardAndPrompt = async ({
       contentPreview: parsed.preview,
       contentFileId: parsed.fileId,
       contentFileUniqueId: parsed.fileUniqueId,
+      reminderMode,
     };
     await withDbRetry(() => store.createPendingCard(pendingInput));
   } catch (error) {
@@ -208,7 +248,7 @@ const createPendingCardAndPrompt = async ({
   await reply(
     'Добавить это в интервальное обучение?',
     {
-      ...buildAddKeyboard(cardId),
+      ...buildAddKeyboard(cardId, reminderMode),
       reply_parameters: { message_id: sourceMessageId },
     },
   );
@@ -519,6 +559,76 @@ export const createBot = (store: CardStore) => {
     });
   });
 
+  bot.action(new RegExp(`^${ACTIONS.chooseReminder}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      await ctx.editMessageReplyMarkup(
+        buildReminderModeKeyboard(cardId).reply_markup,
+      );
+      await ctx.answerCbQuery('Выберите режим напоминаний');
+    } catch (error) {
+      logger.error('Не удалось открыть выбор режима', error);
+      await ctx.answerCbQuery('Ошибка (E_REMINDER_OPEN)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${ACTIONS.backReminder}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      await ctx.editMessageReplyMarkup(
+        buildAddKeyboard(cardId, card.reminderMode).reply_markup,
+      );
+      await ctx.answerCbQuery();
+    } catch (error) {
+      logger.error('Не удалось вернуть основную клавиатуру', error);
+      await ctx.answerCbQuery('Ошибка (E_REMINDER_BACK)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${ACTIONS.setReminder}\\|([^|]+)\\|(sm2|daily|weekly)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const reminderMode = ctx.match?.[2] as ReminderMode | undefined;
+    if (!cardId || !reminderMode) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      const updated = await withDbRetry(() =>
+        store.updateCardReminderMode(cardId, reminderMode),
+      );
+      await ctx.editMessageReplyMarkup(
+        buildAddKeyboard(cardId, updated.reminderMode).reply_markup,
+      );
+      await ctx.answerCbQuery(`Режим: ${reminderModeLabels[updated.reminderMode]}`);
+    } catch (error) {
+      logger.error('Не удалось сохранить режим', error);
+      await ctx.answerCbQuery('Ошибка (E_REMINDER_SET)', { show_alert: true });
+    }
+  });
+
   bot.action(new RegExp(`^${ACTIONS.confirm}\\|(.+)$`), async (ctx) => {
     const cardId = ctx.match?.[1];
     if (!cardId) {
@@ -531,7 +641,10 @@ export const createBot = (store: CardStore) => {
         await ctx.answerCbQuery('Эта карточка уже обработана');
         return;
       }
-      const nextReviewAt = computeInitialReviewDate(config.initialReviewMinutes);
+      const nextReviewAt = computeInitialReviewDateForMode(
+        card.reminderMode,
+        config.initialReviewMinutes,
+      );
       await withDbRetry(() => store.activateCard(cardId, { nextReviewAt }));
       await ctx.answerCbQuery(
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
