@@ -14,6 +14,7 @@ export interface CardRecord {
   contentPreview: string | null;
   contentFileId: string | null;
   contentFileUniqueId: string | null;
+  reminderMode: ReminderMode;
   status: CardStatus;
   repetition: number;
   nextReviewAt: string | null;
@@ -39,6 +40,7 @@ export interface CreatePendingCardInput {
   contentPreview: string | null;
   contentFileId: string | null;
   contentFileUniqueId: string | null;
+  reminderMode: ReminderMode;
 }
 
 export interface ActivateCardInput {
@@ -70,6 +72,8 @@ export interface RecordNotificationInput {
   reason: NotificationReason;
   sentAt: string;
 }
+
+export type ReminderMode = 'sm2' | 'daily' | 'weekly';
 
 const parseSourceMessageIds = (value: unknown): number[] | null => {
   if (!value) {
@@ -114,6 +118,7 @@ const rowToCard = (row: any): CardRecord => ({
   contentPreview: row.content_preview,
   contentFileId: row.content_file_id,
   contentFileUniqueId: row.content_file_unique_id,
+  reminderMode: row.reminder_mode as ReminderMode,
   status: row.status as CardStatus,
   repetition: Number(row.repetition),
   nextReviewAt: row.next_review_at,
@@ -271,7 +276,7 @@ export class CardStore {
       `
       INSERT INTO cards (
         id, user_id, source_chat_id, source_message_id, source_message_ids,
-        content_type, content_preview, content_file_id, content_file_unique_id, status,
+        content_type, content_preview, content_file_id, content_file_unique_id, reminder_mode, status,
         repetition,
         next_review_at,
         last_reviewed_at,
@@ -285,7 +290,7 @@ export class CardStore {
         created_at, updated_at
       ) VALUES (
         $1, $2, $3, $4, $5,
-        $6, $7, $8, $9, 'pending',
+        $6, $7, $8, $9, $10, 'pending',
         0,
         NULL,
         NULL,
@@ -296,7 +301,7 @@ export class CardStore {
         NULL,
         NULL,
         NULL,
-        $10, $10
+        $11, $11
       )
       RETURNING *
     `,
@@ -310,6 +315,7 @@ export class CardStore {
         input.contentPreview,
         input.contentFileId,
         input.contentFileUniqueId,
+        input.reminderMode,
         now,
       ],
     );
@@ -326,6 +332,20 @@ export class CardStore {
       throw new Error(`Card ${id} not found`);
     }
     return rowToCard(rows[0]);
+  }
+
+  async updateCardReminderMode(id: string, reminderMode: ReminderMode): Promise<CardRecord> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE cards
+      SET reminder_mode = $1,
+          updated_at = $2
+      WHERE id = $3
+    `,
+      [reminderMode, now, id],
+    );
+    return this.getCardById(id);
   }
 
   async activateCard(id: string, input: ActivateCardInput): Promise<CardRecord> {

@@ -33,6 +33,7 @@ export const cards = pgTable(
     contentPreview: text('content_preview'),
     contentFileId: text('content_file_id'),
     contentFileUniqueId: text('content_file_unique_id'),
+    reminderMode: text('reminder_mode').notNull().default('sm2'),
     status: text('status').notNull(), // 'pending' | 'learning' | 'awaiting_grade' | 'archived'
     repetition: integer('repetition').notNull().default(0),
     nextReviewAt: text('next_review_at'),
@@ -59,6 +60,10 @@ export const cards = pgTable(
     check(
       'cards_status_check',
       sql`${table.status} IN ('pending', 'learning', 'awaiting_grade', 'archived')`,
+    ),
+    check(
+      'cards_reminder_mode_check',
+      sql`${table.reminderMode} IN ('sm2', 'daily', 'weekly')`,
     ),
   ],
 );
