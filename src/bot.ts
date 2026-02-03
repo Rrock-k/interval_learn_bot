@@ -176,7 +176,7 @@ const buildAddKeyboard = (cardId: string, reminderMode: ReminderMode) =>
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
     [
       Markup.button.callback(
-        `Выбрать режим напоминаний`,
+        `Другое расписание`,
         `${ACTIONS.chooseReminder}|${cardId}`,
       ),
     ],
@@ -262,6 +262,13 @@ const formatNextReviewMessage = (isoDate: string) => {
   }
   const diffDays = next.diff(dayjs(), 'day');
   return `через ~${Math.max(1, diffDays)} д`;
+};
+
+const buildAddedMessage = (reminderMode: ReminderMode) => {
+  if (reminderMode === 'sm2') {
+    return '✅ Добавлено в интервальное обучение';
+  }
+  return `✅ Добавлено в интервальное обучение\nРежим: ${reminderModeLabels[reminderMode]}`;
 };
 
 const getWebAppUrl = () => {
@@ -619,10 +626,19 @@ export const createBot = (store: CardStore) => {
       const updated = await withDbRetry(() =>
         store.updateCardReminderMode(cardId, reminderMode),
       );
-      await ctx.editMessageReplyMarkup(
-        buildAddKeyboard(cardId, updated.reminderMode).reply_markup,
+      const nextReviewAt = computeInitialReviewDateForMode(
+        updated.reminderMode,
+        config.initialReviewMinutes,
       );
-      await ctx.answerCbQuery(`Режим: ${reminderModeLabels[updated.reminderMode]}`);
+      await withDbRetry(() => store.activateCard(cardId, { nextReviewAt }));
+      await ctx.answerCbQuery(
+        `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
+      );
+      try {
+        await ctx.editMessageText(buildAddedMessage(updated.reminderMode));
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение', error);
+      }
     } catch (error) {
       logger.error('Не удалось сохранить режим', error);
       await ctx.answerCbQuery('Ошибка (E_REMINDER_SET)', { show_alert: true });
@@ -650,7 +666,7 @@ export const createBot = (store: CardStore) => {
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
       );
       try {
-        await ctx.editMessageText('✅ Добавлено в интервальное обучение');
+        await ctx.editMessageText(buildAddedMessage(card.reminderMode));
       } catch (error) {
         logger.warn('Не удалось обновить сообщение', error);
       }
