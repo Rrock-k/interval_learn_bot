@@ -364,6 +364,26 @@ body {
   gap: 16px;
 }
 
+/* Calendar animation wrapper */
+.calendar__month-wrapper {
+  overflow: hidden;
+  transition: height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.calendar__slider {
+  display: flex;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.calendar__month-container {
+  flex-shrink: 0;
+  width: 100%;
+}
+
+.calendar__days-wrapper {
+  transition: opacity 0.2s ease;
+}
+
 /* Month navigation */
 .cal-nav {
   display: flex;

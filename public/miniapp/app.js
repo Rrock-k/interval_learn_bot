@@ -169,6 +169,9 @@ function switchView(viewName) {
   if (viewName === 'cards') {
     loadCards();
   } else if (viewName === 'calendar') {
+    // Reset calendar to current month when switching to calendar view
+    calendarMonth = new Date();
+    calendarSelectedDate = null;
     loadCalendar();
   } else if (viewName === 'stats') {
     loadStats();
@@ -679,10 +682,11 @@ function renderCalendar() {
   const year = calendarMonth.getFullYear();
   const month = calendarMonth.getMonth();
 
-  let html = renderMonthGrid(year, month, byDate);
+  const monthGrid = renderMonthGrid(year, month, byDate);
 
+  let daysHtml = '';
   if (calendarSelectedDate) {
-    html += renderDayCards(calendarSelectedDate, byDate);
+    daysHtml = renderDayCards(calendarSelectedDate, byDate);
   } else {
     // Show all days with cards in this month, sorted
     const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
@@ -690,11 +694,33 @@ function renderCalendar() {
       .filter(k => k.startsWith(monthPrefix))
       .sort();
     if (daysWithCards.length > 0) {
-      html += daysWithCards.map(k => renderDayCards(k, byDate)).join('');
+      daysHtml = daysWithCards.map(k => renderDayCards(k, byDate)).join('');
     }
   }
 
+  const html = `
+    <div class="calendar__month-wrapper">
+      <div class="calendar__slider">
+        <div class="calendar__month-container">
+          ${monthGrid}
+        </div>
+      </div>
+    </div>
+    <div class="calendar__days-wrapper">
+      ${daysHtml}
+    </div>
+  `;
+
   calendarContent.innerHTML = html;
+
+  // Set initial height
+  requestAnimationFrame(() => {
+    const wrapper = calendarContent.querySelector('.calendar__month-wrapper');
+    const container = calendarContent.querySelector('.calendar__month-container');
+    if (wrapper && container) {
+      wrapper.style.height = container.offsetHeight + 'px';
+    }
+  });
 }
 
 async function loadCalendar() {
@@ -874,14 +900,75 @@ document.getElementById('statusFilter').addEventListener('change', (e) => {
   loadCards();
 });
 
+// Helper function to animate calendar month transition
+function animateMonthTransition(direction) {
+  const calendarContent = document.getElementById('calendarContent');
+  const wrapper = calendarContent.querySelector('.calendar__month-wrapper');
+  const slider = calendarContent.querySelector('.calendar__slider');
+  const container = calendarContent.querySelector('.calendar__month-container');
+
+  if (!wrapper || !slider || !container) {
+    // Fallback if elements not found
+    calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + direction, 1);
+    calendarSelectedDate = null;
+    renderCalendar();
+    return;
+  }
+
+  // Create next/prev month element
+  const byDate = groupCardsByDate(calendarCards);
+  const nextYear = calendarMonth.getFullYear();
+  const nextMonth = calendarMonth.getMonth() + direction;
+  const targetDate = new Date(nextYear, nextMonth, 1);
+  const nextMonthGrid = renderMonthGrid(targetDate.getFullYear(), targetDate.getMonth(), byDate);
+
+  const tempContainer = document.createElement('div');
+  tempContainer.className = 'calendar__month-container';
+  tempContainer.innerHTML = nextMonthGrid;
+
+  // Add to slider
+  if (direction > 0) {
+    slider.appendChild(tempContainer);
+  } else {
+    slider.insertBefore(tempContainer, container);
+    slider.style.transform = 'translateX(-100%)';
+  }
+
+  // Get heights
+  const currentHeight = container.offsetHeight;
+  const nextHeight = tempContainer.offsetHeight;
+  wrapper.style.height = currentHeight + 'px';
+
+  // Animate
+  requestAnimationFrame(() => {
+    wrapper.style.height = nextHeight + 'px';
+    slider.style.transform = direction > 0 ? 'translateX(-100%)' : 'translateX(0)';
+
+    setTimeout(() => {
+      calendarMonth = targetDate;
+      calendarSelectedDate = null;
+      renderCalendar();
+    }, 300);
+  });
+}
+
+// Helper function to update wrapper height
+function updateCalendarHeight() {
+  const calendarContent = document.getElementById('calendarContent');
+  const wrapper = calendarContent.querySelector('.calendar__month-wrapper');
+  const container = calendarContent.querySelector('.calendar__month-container');
+
+  if (wrapper && container) {
+    wrapper.style.height = container.offsetHeight + 'px';
+  }
+}
+
 // Calendar interactions
 document.getElementById('calendarContent').addEventListener('click', (event) => {
   const navBtn = event.target.closest('[data-action="prev-month"], [data-action="next-month"]');
   if (navBtn) {
     const dir = navBtn.dataset.action === 'prev-month' ? -1 : 1;
-    calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + dir, 1);
-    calendarSelectedDate = null;
-    renderCalendar();
+    animateMonthTransition(dir);
     return;
   }
 
