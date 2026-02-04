@@ -570,24 +570,142 @@ function refreshCardDetail() {
 }
 
 // Calendar view
+let calendarCards = [];
+let calendarMonth = new Date(); // current viewed month
+let calendarSelectedDate = null; // YYYY-MM-DD or null
+
+function toDateKey(date) {
+  const d = new Date(date);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function groupCardsByDate(cards) {
+  const byDate = {};
+  cards.forEach(card => {
+    if (!card.nextReviewAt) return;
+    const key = toDateKey(card.nextReviewAt);
+    if (!byDate[key]) byDate[key] = [];
+    byDate[key].push(card);
+  });
+  return byDate;
+}
+
+function renderMonthGrid(year, month, byDate) {
+  const monthNames = [
+    'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+  ];
+  const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const daysInMonth = lastDay.getDate();
+  // Monday=0 based
+  let startDow = firstDay.getDay() - 1;
+  if (startDow < 0) startDow = 6;
+
+  const todayKey = toDateKey(new Date());
+
+  let cells = '';
+  // empty cells before first day
+  for (let i = 0; i < startDow; i++) {
+    cells += '<div class="cal-cell cal-cell--empty"></div>';
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const count = (byDate[key] || []).length;
+    const isToday = key === todayKey;
+    const isSelected = key === calendarSelectedDate;
+    let cls = 'cal-cell';
+    if (isToday) cls += ' cal-cell--today';
+    if (isSelected) cls += ' cal-cell--selected';
+    if (count > 0) cls += ' cal-cell--has-cards';
+
+    cells += `
+      <div class="${cls}" data-date="${key}">
+        <span class="cal-cell__day">${d}</span>
+        ${count > 0 ? `<span class="cal-cell__count">${count}</span>` : ''}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="cal-nav">
+      <button class="cal-nav__btn" data-action="prev-month" type="button">&larr;</button>
+      <span class="cal-nav__title">${monthNames[month]} ${year}</span>
+      <button class="cal-nav__btn" data-action="next-month" type="button">&rarr;</button>
+    </div>
+    <div class="cal-grid">
+      ${dayNames.map(n => `<div class="cal-cell cal-cell--header">${n}</div>`).join('')}
+      ${cells}
+    </div>
+  `;
+}
+
+function renderDayCards(dateKey, byDate) {
+  const cards = byDate[dateKey] || [];
+  if (cards.length === 0) return '';
+
+  const formatted = new Date(dateKey + 'T00:00:00').toLocaleDateString('ru', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  });
+
+  return `
+    <div class="calendar-day">
+      <div class="calendar-day__header">
+        <span>${formatted}</span>
+        <span class="calendar-day__count">${cards.length}</span>
+      </div>
+      <div class="calendar-day__cards">
+        ${cards
+          .sort((a, b) => new Date(a.nextReviewAt) - new Date(b.nextReviewAt))
+          .map(card => {
+            const time = new Date(card.nextReviewAt).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+            return `<div class="calendar-card" data-card-id="${card.id}">
+              <span class="calendar-card__time">${time}</span>
+              <span class="calendar-card__text">${escapeHtml(card.contentPreview || 'Без текста')}</span>
+            </div>`;
+          }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderCalendar() {
+  const calendarContent = document.getElementById('calendarContent');
+  const byDate = groupCardsByDate(calendarCards);
+  const year = calendarMonth.getFullYear();
+  const month = calendarMonth.getMonth();
+
+  let html = renderMonthGrid(year, month, byDate);
+
+  if (calendarSelectedDate) {
+    html += renderDayCards(calendarSelectedDate, byDate);
+  } else {
+    // Show all days with cards in this month, sorted
+    const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
+    const daysWithCards = Object.keys(byDate)
+      .filter(k => k.startsWith(monthPrefix))
+      .sort();
+    if (daysWithCards.length > 0) {
+      html += daysWithCards.map(k => renderDayCards(k, byDate)).join('');
+    }
+  }
+
+  calendarContent.innerHTML = html;
+}
+
 async function loadCalendar() {
   const calendarContent = document.getElementById('calendarContent');
   calendarContent.innerHTML = '<div class="loading">Загрузка календаря...</div>';
-  
+
   try {
     const result = await apiCall('/api/miniapp/cards?status=learning');
-    const cards = result.data || [];
-    
-    // Group by date
-    const byDate = {};
-    cards.forEach(card => {
-      if (!card.nextReviewAt) return;
-      const date = new Date(card.nextReviewAt).toLocaleDateString('ru', { year: 'numeric', month: 'long', day: 'numeric' });
-      if (!byDate[date]) byDate[date] = [];
-      byDate[date].push(card);
-    });
-    
-    if (Object.keys(byDate).length === 0) {
+    calendarCards = result.data || [];
+
+    if (calendarCards.filter(c => c.nextReviewAt).length === 0) {
       calendarContent.innerHTML = `
         <div class="empty">
           <div class="empty__icon">📅</div>
@@ -596,22 +714,9 @@ async function loadCalendar() {
       `;
       return;
     }
-    
-    calendarContent.innerHTML = Object.entries(byDate)
-      .sort(([a], [b]) => new Date(a) - new Date(b))
-      .map(([date, cards]) => `
-        <div class="calendar-day">
-          <div class="calendar-day__header">
-            <span>${date}</span>
-            <span class="calendar-day__count">${cards.length}</span>
-          </div>
-          <div class="calendar-day__cards">
-            ${cards.map(card => `
-              <div class="calendar-card">${escapeHtml(card.contentPreview || 'Без текста')}</div>
-            `).join('')}
-          </div>
-        </div>
-      `).join('');
+
+    calendarSelectedDate = null;
+    renderCalendar();
   } catch (error) {
     console.error('Error loading calendar:', error);
     calendarContent.innerHTML = `
@@ -767,6 +872,39 @@ document.addEventListener(
 document.getElementById('statusFilter').addEventListener('change', (e) => {
   currentFilter = e.target.value;
   loadCards();
+});
+
+// Calendar interactions
+document.getElementById('calendarContent').addEventListener('click', (event) => {
+  const navBtn = event.target.closest('[data-action="prev-month"], [data-action="next-month"]');
+  if (navBtn) {
+    const dir = navBtn.dataset.action === 'prev-month' ? -1 : 1;
+    calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + dir, 1);
+    calendarSelectedDate = null;
+    renderCalendar();
+    return;
+  }
+
+  const cell = event.target.closest('.cal-cell[data-date]');
+  if (cell) {
+    const dateKey = cell.dataset.date;
+    calendarSelectedDate = calendarSelectedDate === dateKey ? null : dateKey;
+    renderCalendar();
+    return;
+  }
+
+  const cardEl = event.target.closest('.calendar-card[data-card-id]');
+  if (cardEl) {
+    const cardId = cardEl.dataset.cardId;
+    const card = calendarCards.find(c => c.id === cardId);
+    if (card) {
+      // Make sure card is in cardsData for detail view
+      if (!cardsData.find(c => c.id === cardId)) {
+        cardsData.push(card);
+      }
+      openCardDetail(cardId);
+    }
+  }
 });
 
 const initialLoad = () => {

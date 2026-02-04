@@ -364,6 +364,118 @@ body {
   gap: 16px;
 }
 
+/* Month navigation */
+.cal-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0 12px;
+}
+
+.cal-nav__title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cal-nav__btn {
+  border: none;
+  background: var(--tg-theme-secondary-bg-color);
+  color: var(--tg-theme-text-color);
+  font-size: 16px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cal-nav__btn:active {
+  opacity: 0.7;
+}
+
+/* Month grid */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.cal-cell {
+  aspect-ratio: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  cursor: pointer;
+  position: relative;
+  gap: 2px;
+  min-height: 40px;
+}
+
+.cal-cell--header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tg-theme-hint-color);
+  cursor: default;
+  aspect-ratio: auto;
+  min-height: 24px;
+}
+
+.cal-cell--empty {
+  cursor: default;
+}
+
+.cal-cell__day {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.cal-cell__count {
+  font-size: 9px;
+  font-weight: 600;
+  background: var(--tg-theme-button-color);
+  color: var(--tg-theme-button-text-color);
+  border-radius: 999px;
+  min-width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.cal-cell--today {
+  background: var(--tg-theme-secondary-bg-color);
+}
+
+.cal-cell--today .cal-cell__day {
+  font-weight: 700;
+  color: var(--tg-theme-button-color);
+}
+
+.cal-cell--selected {
+  background: var(--tg-theme-button-color);
+}
+
+.cal-cell--selected .cal-cell__day {
+  color: var(--tg-theme-button-text-color);
+  font-weight: 700;
+}
+
+.cal-cell--selected .cal-cell__count {
+  background: var(--tg-theme-button-text-color);
+  color: var(--tg-theme-button-color);
+}
+
+.cal-cell--has-cards:not(.cal-cell--selected):not(.cal-cell--today) {
+  background: color-mix(in srgb, var(--tg-theme-button-color) 10%, transparent);
+}
+
+/* Day cards list */
 .calendar-day {
   background: var(--tg-theme-secondary-bg-color);
   border-radius: 16px;
@@ -397,6 +509,29 @@ body {
   background: var(--tg-theme-bg-color);
   border-radius: 12px;
   font-size: 14px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.calendar-card:active {
+  opacity: 0.7;
+}
+
+.calendar-card__time {
+  font-size: 12px;
+  color: var(--tg-theme-hint-color);
+  white-space: nowrap;
+  padding-top: 1px;
+}
+
+.calendar-card__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Stats */
