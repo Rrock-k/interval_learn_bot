@@ -60,28 +60,23 @@ export class ReviewScheduler {
 
     for (const card of overdueCards) {
       try {
-        logger.info(`Auto-grading overdue card ${card.id} (awaiting since ${card.awaitingGradeSince})`);
-        
-        const { computeReview } = await import('./spacedRepetition');
-        const result = computeReview(card, 'ok');
-        
-        await withDbRetry(() =>
-          this.store.saveReviewResult({
-            cardId: card.id,
-            nextReviewAt: result.nextReviewAt,
-            repetition: result.repetition,
-            reviewedAt: new Date().toISOString(),
-          }),
-        );
+        logger.info(`Re-sending unreviewed card ${card.id} (awaiting since ${card.awaitingGradeSince})`);
 
-        // Clean up pending message keyboard
+        // Mark old message as "не просмотрено"
         if (card.pendingChannelId && card.pendingChannelMessageId) {
-          await this.cleanupPendingMessage(card);
+          await this.markMessageNotViewed(card);
         }
 
-        logger.info(`Auto-graded card ${card.id}: next review ${result.nextReviewAt}`);
+        // Clear awaiting state so sendCardToChannel can re-send
+        await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
+        const freshCard = await withDbRetry(() => this.store.getCardById(card.id));
+
+        // Send new reminder immediately
+        await this.sendCardToChannel(freshCard, 'scheduled');
+
+        logger.info(`Re-sent unreviewed card ${card.id}`);
       } catch (error) {
-        logger.error(`Failed to auto-grade card ${card.id}`, error);
+        logger.error(`Failed to re-send card ${card.id}`, error);
       }
     }
   }
@@ -221,6 +216,28 @@ export class ReviewScheduler {
       logger.error(`Не удалось отправить карточку ${card.id}`, error);
       const retryAt = dayjs().add(1, 'hour').toISOString();
       await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
+    }
+  }
+
+  private async markMessageNotViewed(card: CardRecord) {
+    if (!card.pendingChannelId || !card.pendingChannelMessageId) return;
+    const chatId = card.pendingChannelId;
+    const messageId = card.pendingChannelMessageId;
+    const label = '⏭ Не просмотрено — отправлено снова';
+    try {
+      await this.bot.telegram.editMessageText(
+        chatId, messageId, undefined, label,
+        { reply_markup: { inline_keyboard: [] } },
+      );
+    } catch {
+      try {
+        await this.bot.telegram.editMessageCaption(
+          chatId, messageId, undefined, label,
+          { reply_markup: { inline_keyboard: [] } },
+        );
+      } catch (err) {
+        logger.warn(`Не удалось отметить карточку ${card.id} как не просмотренную`, err);
+      }
     }
   }
 
