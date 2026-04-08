@@ -1,6 +1,7 @@
 import dayjs from 'dayjs';
 import { config } from './config';
 import { CardRecord, ReminderMode } from './db';
+import { computeNextFromSchedule, parseScheduleRule } from './schedule';
 
 export type GradeKey = 'again' | 'ok';
 
@@ -44,14 +45,24 @@ const repetitionFromInterval = (interval: number): number => {
 
 export const computeReview = (card: CardRecord, grade: GradeKey): ReviewComputationResult => {
   const now = dayjs();
-  if (card.reminderMode === 'daily' || card.reminderMode === 'weekly') {
-    const interval = card.reminderMode === 'daily' ? 1 : 7;
-    const nextReviewAt = now.add(interval, 'day').toISOString();
+
+  // Schedule mode: use the stored rule to compute next date
+  if (card.reminderMode === 'schedule') {
+    const rule = parseScheduleRule(card.scheduleRule);
+    if (rule) {
+      return {
+        repetition: (card.repetition ?? 0) + 1,
+        nextReviewAt: computeNextFromSchedule(rule),
+      };
+    }
+    // Fallback: if no rule, treat as daily
     return {
       repetition: (card.repetition ?? 0) + 1,
-      nextReviewAt,
+      nextReviewAt: now.add(1, 'day').toISOString(),
     };
   }
+
+  // SM-2 mode: grade-based logic
   let repetition = card.repetition ?? 0;
   let interval = 0;
 
@@ -94,13 +105,14 @@ export const computeInitialReviewDate = (minutes: number): string => {
 
 export const computeInitialReviewDateForMode = (
   reminderMode: ReminderMode,
+  scheduleRule: string | null,
   minutes: number,
 ): string => {
-  if (reminderMode === 'daily') {
-    return dayjs().add(1, 'day').toISOString();
-  }
-  if (reminderMode === 'weekly') {
-    return dayjs().add(7, 'day').toISOString();
+  if (reminderMode === 'schedule') {
+    const rule = parseScheduleRule(scheduleRule);
+    if (rule) {
+      return computeNextFromSchedule(rule);
+    }
   }
   return computeInitialReviewDate(minutes);
 };

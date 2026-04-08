@@ -1,4 +1,4 @@
-import { pgTable, text, integer, index, check } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, index, check, serial } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable(
@@ -34,6 +34,7 @@ export const cards = pgTable(
     contentFileId: text('content_file_id'),
     contentFileUniqueId: text('content_file_unique_id'),
     reminderMode: text('reminder_mode').notNull().default('sm2'),
+    scheduleRule: text('schedule_rule'),
     status: text('status').notNull(), // 'pending' | 'learning' | 'awaiting_grade' | 'archived'
     repetition: integer('repetition').notNull().default(0),
     nextReviewAt: text('next_review_at'),
@@ -63,7 +64,14 @@ export const cards = pgTable(
     ),
     check(
       'cards_reminder_mode_check',
-      sql`${table.reminderMode} IN ('sm2', 'daily', 'weekly')`,
+      sql`${table.reminderMode} IN ('sm2', 'schedule')`,
     ),
   ],
 );
+
+export const unrecognizedSchedules = pgTable('unrecognized_schedules', {
+  id: serial('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  input: text('input').notNull(),
+  createdAt: text('created_at').notNull(),
+});

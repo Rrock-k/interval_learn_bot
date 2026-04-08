@@ -14,10 +14,21 @@ import {
 import {
   buildAdjustKeyboard,
   buildReviewKeyboard,
+  buildSchedulePickerKeyboard,
+  buildWeekdayPickerKeyboard,
   REVIEW_ACTIONS,
+  CARD_ACTIONS,
 } from './reviewKeyboards';
 import { buildMiniAppCardParam, buildMiniAppDeepLink } from './telegramLinks';
 import { withDbRetry } from './utils/dbRetry';
+import {
+  PRESET_BY_CODE,
+  serializeScheduleRule,
+  scheduleRuleLabel,
+  parseScheduleRule,
+  computeNextFromSchedule,
+  parseNaturalSchedule,
+} from './schedule';
 
 type TelegrafContext = Context<Update>;
 type ReplyFn = (text: string, extra?: Parameters<TelegrafContext['reply']>[1]) => Promise<unknown>;
@@ -28,14 +39,30 @@ const ACTIONS = {
   chooseReminder: 'choose_reminder',
   setReminder: 'set_reminder',
   backReminder: 'back_reminder',
+  customSchedule: 'custom_sched',
   approveUser: 'approve_user',
   rejectUser: 'reject_user',
 } as const;
 
-const reminderModeLabels: Record<ReminderMode, string> = {
-  sm2: 'SM-2 интервалы',
-  daily: 'Каждый день',
-  weekly: 'Каждую неделю',
+// Tracks users awaiting free-text schedule input: userId → { cardId, context }
+interface PendingScheduleInput {
+  cardId: string;
+  ctx: 'a' | 'r'; // 'a' = adding card, 'r' = review reschedule
+  messageId: number; // message to edit after parsing
+}
+const pendingScheduleInputs = new Map<string, PendingScheduleInput>();
+const SCHEDULE_INPUT_TTL_MS = 5 * 60_000;
+
+// Tracks the most recent pending card per user (for implicit schedule input)
+const recentPendingCards = new Map<string, string>(); // userId → cardId
+
+const scheduleModeLabel = (mode: ReminderMode, scheduleRule: string | null): string => {
+  if (mode === 'schedule') {
+    const rule = parseScheduleRule(scheduleRule);
+    if (rule) return scheduleRuleLabel(rule);
+    return 'Расписание';
+  }
+  return 'SM-2 интервалы';
 };
 
 const SUPPORTED_MESSAGE_SOURCE_TYPES = new Set(['private']);
@@ -171,7 +198,7 @@ const extractMediaGroupMessageIds = (messages: Message[]) => {
   return Array.from(unique).sort((a, b) => a - b);
 };
 
-const buildAddKeyboard = (cardId: string, reminderMode: ReminderMode) =>
+const buildAddKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
     [
@@ -181,29 +208,6 @@ const buildAddKeyboard = (cardId: string, reminderMode: ReminderMode) =>
       ),
     ],
     [Markup.button.callback('Отмена', `${ACTIONS.cancel}|${cardId}`)],
-  ]);
-
-const buildReminderModeKeyboard = (cardId: string) =>
-  Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        `${reminderModeLabels.sm2} (дефолт)`,
-        `${ACTIONS.setReminder}|${cardId}|sm2`,
-      ),
-    ],
-    [
-      Markup.button.callback(
-        reminderModeLabels.daily,
-        `${ACTIONS.setReminder}|${cardId}|daily`,
-      ),
-    ],
-    [
-      Markup.button.callback(
-        reminderModeLabels.weekly,
-        `${ACTIONS.setReminder}|${cardId}|weekly`,
-      ),
-    ],
-    [Markup.button.callback('⬅️ Назад', `${ACTIONS.backReminder}|${cardId}`)],
   ]);
 
 const createPendingCardAndPrompt = async ({
@@ -224,7 +228,6 @@ const createPendingCardAndPrompt = async ({
   reply: ReplyFn;
 }) => {
   const cardId = uuid();
-  const reminderMode: ReminderMode = 'sm2';
   try {
     const pendingInput = {
       id: cardId,
@@ -236,9 +239,10 @@ const createPendingCardAndPrompt = async ({
       contentPreview: parsed.preview,
       contentFileId: parsed.fileId,
       contentFileUniqueId: parsed.fileUniqueId,
-      reminderMode,
+      reminderMode: 'sm2' as ReminderMode,
     };
     await withDbRetry(() => store.createPendingCard(pendingInput));
+    recentPendingCards.set(`${userId}`, cardId);
   } catch (error) {
     logger.error('Не удалось создать карточку', error);
     await reply('Ошибка сохранения (код: E_DB_WRITE). Попробуйте ещё раз.');
@@ -248,7 +252,7 @@ const createPendingCardAndPrompt = async ({
   await reply(
     'Добавить это в интервальное обучение?',
     {
-      ...buildAddKeyboard(cardId, reminderMode),
+      ...buildAddKeyboard(cardId),
       reply_parameters: { message_id: sourceMessageId },
     },
   );
@@ -264,11 +268,11 @@ const formatNextReviewMessage = (isoDate: string) => {
   return `через ~${Math.max(1, diffDays)} д`;
 };
 
-const buildAddedMessage = (reminderMode: ReminderMode) => {
-  if (reminderMode === 'sm2') {
+const buildAddedMessage = (mode: ReminderMode, scheduleRule: string | null) => {
+  if (mode === 'sm2') {
     return '✅ Добавлено в интервальное обучение';
   }
-  return `✅ Добавлено в интервальное обучение\nРежим: ${reminderModeLabels[reminderMode]}`;
+  return `✅ Добавлено в интервальное обучение\nРежим: ${scheduleModeLabel(mode, scheduleRule)}`;
 };
 
 const getWebAppUrl = () => {
@@ -525,6 +529,96 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
+    // Check if user is providing free-text schedule input
+    if ('text' in ctx.message) {
+      // Implicit: user has a pending card and typed a schedule-like text
+      const recentCardId = recentPendingCards.get(`${userId}`);
+      if (recentCardId) {
+        const rule = parseNaturalSchedule(ctx.message.text);
+        if (rule) {
+          recentPendingCards.delete(`${userId}`);
+          try {
+            const card = await withDbRetry(() => store.getCardById(recentCardId));
+            if (card.status === 'pending') {
+              const ruleStr = serializeScheduleRule(rule);
+              await withDbRetry(() =>
+                store.updateCardReminderMode(recentCardId, 'schedule', ruleStr),
+              );
+              const nextReviewAt = computeNextFromSchedule(rule);
+              await withDbRetry(() => store.activateCard(recentCardId, { nextReviewAt }));
+              await ctx.reply(
+                `${buildAddedMessage('schedule', ruleStr)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`,
+                { reply_parameters: { message_id: ctx.message.message_id } },
+              );
+              return;
+            }
+          } catch (error) {
+            logger.error('Ошибка применения расписания к pending-карточке', error);
+          }
+        }
+      }
+
+      // Explicit: user clicked "Написать своё" and is providing input
+      const pending = pendingScheduleInputs.get(`${userId}`);
+      if (pending) {
+        pendingScheduleInputs.delete(`${userId}`);
+        const rule = parseNaturalSchedule(ctx.message.text);
+        if (!rule) {
+          // Log unrecognized input for future parser improvements
+          store.logUnrecognizedSchedule(`${userId}`, ctx.message.text).catch((err) =>
+            logger.warn('Не удалось залогировать нераспознанное расписание', err),
+          );
+          await ctx.reply(
+            'Не удалось распознать расписание. Попробуйте ещё раз, например: «каждые 3 дня» или «пн, ср, пт»',
+            { reply_parameters: { message_id: ctx.message.message_id } },
+          );
+          // Re-set pending so user can try again
+          pendingScheduleInputs.set(`${userId}`, pending);
+          return;
+        }
+
+        try {
+          const card = await withDbRetry(() => store.getCardById(pending.cardId));
+          const ruleStr = serializeScheduleRule(rule);
+
+          if (pending.ctx === 'a' && card.status === 'pending') {
+            // Card creation flow
+            await withDbRetry(() =>
+              store.updateCardReminderMode(pending.cardId, 'schedule', ruleStr),
+            );
+            const nextReviewAt = computeNextFromSchedule(rule);
+            await withDbRetry(() => store.activateCard(pending.cardId, { nextReviewAt }));
+            await ctx.reply(
+              `${buildAddedMessage('schedule', ruleStr)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`,
+            );
+          } else if (pending.ctx === 'r') {
+            // Review reschedule flow
+            await withDbRetry(() =>
+              store.updateCardReminderMode(pending.cardId, 'schedule', ruleStr),
+            );
+            const nextReviewAt = computeNextFromSchedule(rule);
+            await withDbRetry(() =>
+              store.saveReviewResult({
+                cardId: pending.cardId,
+                nextReviewAt,
+                repetition: (card.repetition ?? 0) + 1,
+                reviewedAt: new Date().toISOString(),
+              }),
+            );
+            await ctx.reply(
+              `Расписание: ${scheduleRuleLabel(rule)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`,
+            );
+          } else {
+            await ctx.reply('Эта карточка уже обработана');
+          }
+        } catch (error) {
+          logger.error('Ошибка обработки текстового расписания', error);
+          await ctx.reply('Не удалось сохранить расписание. Попробуйте ещё раз.');
+        }
+        return;
+      }
+    }
+
     const mediaGroupId = (ctx.message as Message & { media_group_id?: string }).media_group_id;
     if (mediaGroupId) {
       const key = buildMediaGroupKey(ctx.chat.id, mediaGroupId);
@@ -579,9 +673,9 @@ export const createBot = (store: CardStore) => {
         return;
       }
       await ctx.editMessageReplyMarkup(
-        buildReminderModeKeyboard(cardId).reply_markup,
+        buildSchedulePickerKeyboard(cardId, 'a').reply_markup,
       );
-      await ctx.answerCbQuery('Выберите режим напоминаний');
+      await ctx.answerCbQuery('Выберите расписание');
     } catch (error) {
       logger.error('Не удалось открыть выбор режима', error);
       await ctx.answerCbQuery('Ошибка (E_REMINDER_OPEN)', { show_alert: true });
@@ -601,7 +695,7 @@ export const createBot = (store: CardStore) => {
         return;
       }
       await ctx.editMessageReplyMarkup(
-        buildAddKeyboard(cardId, card.reminderMode).reply_markup,
+        buildAddKeyboard(cardId).reply_markup,
       );
       await ctx.answerCbQuery();
     } catch (error) {
@@ -610,11 +704,104 @@ export const createBot = (store: CardStore) => {
     }
   });
 
-  bot.action(new RegExp(`^${ACTIONS.setReminder}\\|([^|]+)\\|(sm2|daily|weekly)$`), async (ctx) => {
+  // Schedule selection during card creation: ss|cardId|code
+  bot.action(new RegExp(`^${CARD_ACTIONS.setSchedule}\\|([^|]+)\\|(.+)$`), async (ctx) => {
     const cardId = ctx.match?.[1];
-    const reminderMode = ctx.match?.[2] as ReminderMode | undefined;
-    if (!cardId || !reminderMode) {
+    const code = ctx.match?.[2];
+    if (!cardId || !code) {
       await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+
+    // "pick" code → show schedule picker (back from weekday picker)
+    if (code === 'pick') {
+      try {
+        await ctx.editMessageReplyMarkup(
+          buildSchedulePickerKeyboard(cardId, 'a').reply_markup,
+        );
+        await ctx.answerCbQuery();
+      } catch (error) {
+        logger.error('Не удалось открыть выбор расписания', error);
+        await ctx.answerCbQuery('Ошибка', { show_alert: true });
+      }
+      return;
+    }
+
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+
+      let mode: ReminderMode;
+      let ruleStr: string | null = null;
+
+      if (code === 'sm2') {
+        mode = 'sm2';
+      } else {
+        const preset = PRESET_BY_CODE.get(code);
+        if (!preset) {
+          await ctx.answerCbQuery('Неизвестный режим');
+          return;
+        }
+        mode = 'schedule';
+        ruleStr = serializeScheduleRule(preset.rule);
+      }
+
+      const updated = await withDbRetry(() =>
+        store.updateCardReminderMode(cardId, mode, ruleStr),
+      );
+      const nextReviewAt = computeInitialReviewDateForMode(
+        updated.reminderMode,
+        updated.scheduleRule,
+        config.initialReviewMinutes,
+      );
+      await withDbRetry(() => store.activateCard(cardId, { nextReviewAt }));
+      await ctx.answerCbQuery(
+        `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
+      );
+      try {
+        await ctx.editMessageText(buildAddedMessage(updated.reminderMode, updated.scheduleRule));
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение', error);
+      }
+    } catch (error) {
+      logger.error('Не удалось сохранить режим', error);
+      await ctx.answerCbQuery('Ошибка (E_SCHED_SET)', { show_alert: true });
+    }
+  });
+
+  // Weekday toggle during card creation: wt|cardId|selectedDays|toggledDay
+  bot.action(new RegExp(`^${CARD_ACTIONS.weekdayToggle}\\|([^|]+)\\|([^|]*)\\|(\\d)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const selectedStr = ctx.match?.[2] ?? '';
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      await ctx.editMessageReplyMarkup(
+        buildWeekdayPickerKeyboard(cardId, 'a', selectedStr).reply_markup,
+      );
+      await ctx.answerCbQuery();
+    } catch (error) {
+      logger.error('Не удалось обновить клавиатуру дней', error);
+      await ctx.answerCbQuery('Ошибка', { show_alert: true });
+    }
+  });
+
+  // Weekday confirm during card creation: wc|cardId|selectedDays
+  bot.action(new RegExp(`^${CARD_ACTIONS.weekdayConfirm}\\|([^|]+)\\|([\\d,]+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const daysStr = ctx.match?.[2];
+    if (!cardId || !daysStr) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const days = daysStr.split(',').map(Number).filter((n) => n >= 1 && n <= 7);
+    if (!days.length) {
+      await ctx.answerCbQuery('Выберите хотя бы один день');
       return;
     }
     try {
@@ -623,25 +810,59 @@ export const createBot = (store: CardStore) => {
         await ctx.answerCbQuery('Эта карточка уже обработана');
         return;
       }
+      const rule = { type: 'weekdays' as const, days };
+      const ruleStr = serializeScheduleRule(rule);
       const updated = await withDbRetry(() =>
-        store.updateCardReminderMode(cardId, reminderMode),
+        store.updateCardReminderMode(cardId, 'schedule', ruleStr),
       );
-      const nextReviewAt = computeInitialReviewDateForMode(
-        updated.reminderMode,
-        config.initialReviewMinutes,
-      );
+      const nextReviewAt = computeNextFromSchedule(rule);
       await withDbRetry(() => store.activateCard(cardId, { nextReviewAt }));
       await ctx.answerCbQuery(
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
       );
       try {
-        await ctx.editMessageText(buildAddedMessage(updated.reminderMode));
+        await ctx.editMessageText(buildAddedMessage(updated.reminderMode, updated.scheduleRule));
       } catch (error) {
         logger.warn('Не удалось обновить сообщение', error);
       }
     } catch (error) {
-      logger.error('Не удалось сохранить режим', error);
-      await ctx.answerCbQuery('Ошибка (E_REMINDER_SET)', { show_alert: true });
+      logger.error('Не удалось сохранить расписание по дням', error);
+      await ctx.answerCbQuery('Ошибка (E_WEEKDAY_SET)', { show_alert: true });
+    }
+  });
+
+  // "Написать своё" button: custom_sched|ctx|cardId
+  bot.action(new RegExp(`^custom_sched\\|(a|r)\\|(.+)$`), async (ctx) => {
+    const schedCtx = ctx.match?.[1] as 'a' | 'r' | undefined;
+    const cardId = ctx.match?.[2];
+    if (!cardId || !schedCtx) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const userId = `${ctx.from?.id}`;
+    pendingScheduleInputs.set(userId, {
+      cardId,
+      ctx: schedCtx,
+      messageId: ctx.callbackQuery?.message?.message_id ?? 0,
+    });
+    // Auto-cleanup after TTL
+    setTimeout(() => {
+      const current = pendingScheduleInputs.get(userId);
+      if (current?.cardId === cardId) pendingScheduleInputs.delete(userId);
+    }, SCHEDULE_INPUT_TTL_MS);
+
+    try {
+      await ctx.editMessageText(
+        'Напишите расписание текстом, например:\n'
+        + '• «каждый день», «через день»\n'
+        + '• «каждые 3 дня», «раз в 2 недели»\n'
+        + '• «каждый месяц», «каждый год»\n'
+        + '• «пн, ср, пт»',
+      );
+      await ctx.answerCbQuery();
+    } catch (error) {
+      logger.error('Не удалось показать подсказку ввода расписания', error);
+      await ctx.answerCbQuery('Ошибка', { show_alert: true });
     }
   });
 
@@ -659,6 +880,7 @@ export const createBot = (store: CardStore) => {
       }
       const nextReviewAt = computeInitialReviewDateForMode(
         card.reminderMode,
+        card.scheduleRule,
         config.initialReviewMinutes,
       );
       await withDbRetry(() => store.activateCard(cardId, { nextReviewAt }));
@@ -666,7 +888,7 @@ export const createBot = (store: CardStore) => {
         `Добавлено, напомню ${formatNextReviewMessage(nextReviewAt)}`,
       );
       try {
-        await ctx.editMessageText(buildAddedMessage(card.reminderMode));
+        await ctx.editMessageText(buildAddedMessage(card.reminderMode, card.scheduleRule));
       } catch (error) {
         logger.warn('Не удалось обновить сообщение', error);
       }
@@ -691,6 +913,9 @@ export const createBot = (store: CardStore) => {
         return;
       }
       await withDbRetry(() => store.deleteCard(cardId));
+      // Clean up pending card tracking
+      const uid = card.userId;
+      if (recentPendingCards.get(uid) === cardId) recentPendingCards.delete(uid);
       await ctx.answerCbQuery('Удалено');
       try {
         await ctx.editMessageText('Пользователь отменил добавление');
@@ -750,6 +975,229 @@ export const createBot = (store: CardStore) => {
     } catch (error) {
       logger.error('Не удалось вернуть основную клавиатуру', error);
       await ctx.answerCbQuery('Ошибка (E_BACK)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.archive}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
+      return;
+    }
+    try {
+      await withDbRetry(() => store.updateStatus(cardId, 'archived'));
+      if (card.pendingChannelId && card.pendingChannelMessageId) {
+        try {
+          await ctx.telegram.editMessageReplyMarkup(
+            card.pendingChannelId,
+            card.pendingChannelMessageId,
+            undefined,
+            undefined,
+          );
+        } catch (editError) {
+          logger.warn(
+            `Не удалось убрать кнопки канала для карточки ${card.id}`,
+            editError,
+          );
+        }
+      }
+      await ctx.editMessageReplyMarkup(undefined);
+      await ctx.answerCbQuery('Карточка архивирована');
+    } catch (error) {
+      logger.error('Ошибка архивации карточки', error);
+      await ctx.answerCbQuery('Не удалось архивировать (E_ARCHIVE)', {
+        show_alert: true,
+      });
+    }
+  });
+
+  // "Change schedule" button in adjust menu → show schedule picker
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.changeSchedule}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      await ctx.editMessageReplyMarkup(
+        buildSchedulePickerKeyboard(cardId, 'r').reply_markup,
+      );
+      await ctx.answerCbQuery('Выберите новое расписание');
+    } catch (error) {
+      logger.error('Не удалось открыть выбор расписания', error);
+      await ctx.answerCbQuery('Ошибка', { show_alert: true });
+    }
+  });
+
+  // Schedule selection during review: rs|cardId|code
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.setSchedule}\\|([^|]+)\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const code = ctx.match?.[2];
+    if (!cardId || !code) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+
+    // "pick" code → show schedule picker (back from weekday picker)
+    if (code === 'pick') {
+      try {
+        await ctx.editMessageReplyMarkup(
+          buildSchedulePickerKeyboard(cardId, 'r').reply_markup,
+        );
+        await ctx.answerCbQuery();
+      } catch (error) {
+        logger.error('Не удалось открыть выбор расписания', error);
+        await ctx.answerCbQuery('Ошибка', { show_alert: true });
+      }
+      return;
+    }
+
+    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
+      return;
+    }
+
+    try {
+      let mode: ReminderMode;
+      let ruleStr: string | null = null;
+      let nextReviewAt: string;
+
+      if (code === 'sm2') {
+        mode = 'sm2';
+        // For SM-2 on reschedule, grade as 'ok' to advance
+        const result = computeReview({ ...card, reminderMode: 'sm2', scheduleRule: null }, 'ok');
+        nextReviewAt = result.nextReviewAt;
+        await withDbRetry(() => store.updateCardReminderMode(cardId, mode, null));
+        await withDbRetry(() =>
+          store.saveReviewResult({
+            cardId,
+            nextReviewAt,
+            repetition: result.repetition,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
+      } else {
+        const preset = PRESET_BY_CODE.get(code);
+        if (!preset) {
+          await ctx.answerCbQuery('Неизвестный режим');
+          return;
+        }
+        mode = 'schedule';
+        ruleStr = serializeScheduleRule(preset.rule);
+        nextReviewAt = computeNextFromSchedule(preset.rule);
+        await withDbRetry(() => store.updateCardReminderMode(cardId, mode, ruleStr));
+        await withDbRetry(() =>
+          store.saveReviewResult({
+            cardId,
+            nextReviewAt,
+            repetition: (card.repetition ?? 0) + 1,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
+      }
+
+      if (card.pendingChannelId && card.pendingChannelMessageId) {
+        try {
+          await ctx.telegram.editMessageReplyMarkup(
+            card.pendingChannelId,
+            card.pendingChannelMessageId,
+            undefined,
+            undefined,
+          );
+        } catch (editError) {
+          logger.warn(`Не удалось убрать кнопки канала для ${card.id}`, editError);
+        }
+      }
+
+      const label = mode === 'sm2' ? 'SM-2' : scheduleModeLabel(mode, ruleStr);
+      await ctx.answerCbQuery(
+        `Расписание: ${label}. Следующее ${formatNextReviewMessage(nextReviewAt)}`,
+      );
+    } catch (error) {
+      logger.error('Ошибка смены расписания из ревью', error);
+      await ctx.answerCbQuery('Ошибка (E_RSCHED)', { show_alert: true });
+    }
+  });
+
+  // Weekday toggle during review: rt|cardId|selectedDays|toggledDay
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.weekdayToggle}\\|([^|]+)\\|([^|]*)\\|(\\d)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const selectedStr = ctx.match?.[2] ?? '';
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      await ctx.editMessageReplyMarkup(
+        buildWeekdayPickerKeyboard(cardId, 'r', selectedStr).reply_markup,
+      );
+      await ctx.answerCbQuery();
+    } catch (error) {
+      logger.error('Не удалось обновить клавиатуру дней', error);
+      await ctx.answerCbQuery('Ошибка', { show_alert: true });
+    }
+  });
+
+  // Weekday confirm during review: rc|cardId|selectedDays
+  bot.action(new RegExp(`^${REVIEW_ACTIONS.weekdayConfirm}\\|([^|]+)\\|([\\d,]+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const daysStr = ctx.match?.[2];
+    if (!cardId || !daysStr) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const days = daysStr.split(',').map(Number).filter((n) => n >= 1 && n <= 7);
+    if (!days.length) {
+      await ctx.answerCbQuery('Выберите хотя бы один день');
+      return;
+    }
+
+    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
+      return;
+    }
+
+    try {
+      const rule = { type: 'weekdays' as const, days };
+      const ruleStr = serializeScheduleRule(rule);
+      const nextReviewAt = computeNextFromSchedule(rule);
+
+      await withDbRetry(() => store.updateCardReminderMode(cardId, 'schedule', ruleStr));
+      await withDbRetry(() =>
+        store.saveReviewResult({
+          cardId,
+          nextReviewAt,
+          repetition: (card.repetition ?? 0) + 1,
+          reviewedAt: new Date().toISOString(),
+        }),
+      );
+
+      if (card.pendingChannelId && card.pendingChannelMessageId) {
+        try {
+          await ctx.telegram.editMessageReplyMarkup(
+            card.pendingChannelId,
+            card.pendingChannelMessageId,
+            undefined,
+            undefined,
+          );
+        } catch (editError) {
+          logger.warn(`Не удалось убрать кнопки канала для ${card.id}`, editError);
+        }
+      }
+
+      await ctx.answerCbQuery(
+        `Расписание: ${scheduleRuleLabel(rule)}. Следующее ${formatNextReviewMessage(nextReviewAt)}`,
+      );
+    } catch (error) {
+      logger.error('Ошибка установки расписания по дням из ревью', error);
+      await ctx.answerCbQuery('Ошибка (E_RWDAY)', { show_alert: true });
     }
   });
 
