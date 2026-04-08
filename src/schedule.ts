@@ -146,31 +146,28 @@ export const parseNaturalSchedule = (input: string): ScheduleRule | null => {
   if (/^через день$/.test(text)) {
     return { type: 'days', interval: 2 };
   }
-  if (/^(каждую неделю|еженедельно)$/.test(text)) {
+  if (/^(каждую неделю|еженедельно|через неделю)$/.test(text)) {
     return { type: 'days', interval: 7 };
   }
-  if (/^(каждый месяц|ежемесячно)$/.test(text)) {
+  if (/^(каждый месяц|ежемесячно|через месяц)$/.test(text)) {
     return { type: 'months', interval: 1 };
   }
-  if (/^(каждый год|ежегодно)$/.test(text)) {
+  if (/^(каждый год|ежегодно|через год)$/.test(text)) {
     return { type: 'years', interval: 1 };
   }
 
-  // --- "каждые N дней/дня/день" ---
-  if (/кажд\w*\s+(\d+)\s*(дн|ден|день)/.test(text)) {
-    const n = extractNumber(text);
-    if (n && n >= 1) return { type: 'days', interval: n };
-  }
-
-  // --- "раз в N дней" ---
-  if (/раз\s+в\s+(\d+)\s*(дн|ден|день)/.test(text)) {
-    const n = extractNumber(text);
-    if (n && n >= 1) return { type: 'days', interval: n };
-  }
-
-  // --- "каждые N недель / раз в N недель" ---
+  // --- "каждые N дней" / "раз в N дней" / "через N дней" ---
   {
-    const m = text.match(/(?:кажд\w*|раз\s+в)\s+(\d+)\s*недел/);
+    const m = text.match(/(?:кажд[а-яё]*|раз\s+в|через)\s+(\d+)\s*(дн|ден|день)/);
+    if (m) {
+      const n = Number(m[1]);
+      if (n >= 1) return { type: 'days', interval: n };
+    }
+  }
+
+  // --- "каждые N недель" / "раз в N недель" / "через N недель" ---
+  {
+    const m = text.match(/(?:кажд[а-яё]*|раз\s+в|через)\s+(\d+)\s*недел/);
     if (m) {
       const n = Number(m[1]);
       if (n >= 1) return { type: 'days', interval: n * 7 };
@@ -182,9 +179,9 @@ export const parseNaturalSchedule = (input: string): ScheduleRule | null => {
     return { type: 'days', interval: 7 };
   }
 
-  // --- "каждые N месяцев / раз в N месяцев" ---
+  // --- "каждые N месяцев" / "раз в N месяцев" / "через N месяцев" ---
   {
-    const m = text.match(/(?:кажд\w*|раз\s+в)\s+(\d+)\s*месяц/);
+    const m = text.match(/(?:кажд[а-яё]*|раз\s+в|через)\s+(\d+)\s*месяц/);
     if (m) {
       const n = Number(m[1]);
       if (n >= 1) return { type: 'months', interval: n };
@@ -196,9 +193,9 @@ export const parseNaturalSchedule = (input: string): ScheduleRule | null => {
     return { type: 'months', interval: 1 };
   }
 
-  // --- "каждые N лет / раз в N лет / года" ---
+  // --- "каждые N лет" / "раз в N лет" / "через N лет" ---
   {
-    const m = text.match(/(?:кажд\w*|раз\s+в)\s+(\d+)\s*(год|лет)/);
+    const m = text.match(/(?:кажд[а-яё]*|раз\s+в|через)\s+(\d+)\s*(год|лет)/);
     if (m) {
       const n = Number(m[1]);
       if (n >= 1) return { type: 'years', interval: n };
@@ -208,6 +205,14 @@ export const parseNaturalSchedule = (input: string): ScheduleRule | null => {
   // --- "раз в год" ---
   if (/раз\s+в\s+год/.test(text)) {
     return { type: 'years', interval: 1 };
+  }
+
+  // --- "по будням" / "по выходным" ---
+  if (/(?:^|\s)(будн|по\s+будн)/.test(text)) {
+    return { type: 'weekdays', days: [1, 2, 3, 4, 5] };
+  }
+  if (/(?:^|\s)(выходн|по\s+выходн)/.test(text)) {
+    return { type: 'weekdays', days: [6, 7] };
   }
 
   // --- Weekdays: extract all day names from text ---
