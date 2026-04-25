@@ -344,6 +344,30 @@ input::placeholder {
   border-color: #e2e8f0;
 }
 
+[data-theme="dark"] .status-chip--pending {
+  color: #fde68a;
+  background: #451a03;
+  border-color: #92400e;
+}
+
+[data-theme="dark"] .status-chip--learning {
+  color: #99f6e4;
+  background: #042f2e;
+  border-color: #0f766e;
+}
+
+[data-theme="dark"] .status-chip--awaiting_grade {
+  color: #bfdbfe;
+  background: #172554;
+  border-color: #1d4ed8;
+}
+
+[data-theme="dark"] .status-chip--archived {
+  color: #cbd5e1;
+  background: #1e293b;
+  border-color: #475569;
+}
+
 .card__date,
 .card-detail__next,
 .card__meta,
@@ -389,6 +413,10 @@ input::placeholder {
 .card__actions .button {
   flex: 1;
   min-width: 132px;
+}
+
+.cards-list__more {
+  width: 100%;
 }
 
 .card-detail {
@@ -625,6 +653,11 @@ input::placeholder {
 .cal-cell--has-cards {
   border-color: #bfdbfe;
   background: #eff6ff;
+}
+
+[data-theme="dark"] .cal-cell--has-cards {
+  border-color: #1d4ed8;
+  background: #172554;
 }
 
 .cal-cell--today {

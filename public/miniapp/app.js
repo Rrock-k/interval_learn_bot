@@ -3,6 +3,26 @@ const tg = window.Telegram.WebApp;
 tg.ready();
 tg.expand();
 
+const hexToRgb = (value) => {
+  if (!value || typeof value !== 'string') return null;
+  const hex = value.trim().replace('#', '');
+  if (!/^[0-9a-f]{3}$|^[0-9a-f]{6}$/i.test(hex)) return null;
+  const normalized =
+    hex.length === 3 ? hex.split('').map((char) => char + char).join('') : hex;
+  const number = Number.parseInt(normalized, 16);
+  return {
+    r: (number >> 16) & 255,
+    g: (number >> 8) & 255,
+    b: number & 255,
+  };
+};
+
+const isDarkColor = (value) => {
+  const rgb = hexToRgb(value);
+  if (!rgb) return false;
+  return (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255 < 0.45;
+};
+
 // Apply Telegram theme
 const applyTheme = () => {
   const params = tg.themeParams || {};
@@ -23,6 +43,34 @@ const applyTheme = () => {
   const resolvedBg = bg || '#ffffff';
   const resolvedText = text || '#0f172a';
   const resolvedHint = hint || '#64748b';
+  const isDark = isDarkColor(resolvedBg);
+  const themeTokens = isDark
+    ? {
+        '--surface': '#0b1120',
+        '--secondary': '#111827',
+        '--muted': '#1f2937',
+        '--accent': '#172554',
+        '--accent-foreground': '#bfdbfe',
+        '--border': '#334155',
+        '--ring': '#60a5fa',
+        '--text-soft': resolvedHint || '#cbd5e1',
+        '--text-subtle': '#94a3b8',
+        '--destructive': '#ef4444',
+        '--shadow-soft': 'none',
+      }
+    : {
+        '--surface': '#f8fafc',
+        '--secondary': '#f8fafc',
+        '--muted': '#f3f4f6',
+        '--accent': '#eef2ff',
+        '--accent-foreground': '#1d4ed8',
+        '--border': '#e5e7eb',
+        '--ring': '#93c5fd',
+        '--text-soft': resolvedHint || '#6b7280',
+        '--text-subtle': '#9ca3af',
+        '--destructive': '#dc2626',
+        '--shadow-soft': '0 8px 24px rgba(15, 23, 42, 0.06)',
+      };
 
   document.documentElement.style.setProperty('--background', resolvedBg);
   document.documentElement.style.setProperty('--foreground', resolvedText);
@@ -31,6 +79,10 @@ const applyTheme = () => {
   document.documentElement.style.setProperty('--popover', resolvedBg);
   document.documentElement.style.setProperty('--card-foreground', resolvedText);
   document.documentElement.style.setProperty('--popover-foreground', resolvedText);
+  Object.entries(themeTokens).forEach(([name, value]) => {
+    document.documentElement.style.setProperty(name, value);
+  });
+  document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
 };
 
 applyTheme();
@@ -39,6 +91,7 @@ if (typeof tg.onEvent === 'function') {
 }
 
 // State
+const CARD_RENDER_BATCH_SIZE = 40;
 let currentView = 'cards';
 let cardsData = [];
 let currentFilter = '';
@@ -46,6 +99,7 @@ let currentSortMode = 'nextReviewAsc';
 let currentSearchQuery = '';
 let currentCardId = null;
 let cardsLoaded = false;
+let visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
 let searchDebounceTimer = null;
 const actionLocks = new Set();
 
@@ -63,7 +117,10 @@ const getStartParamRaw = () => {
   if (fromInitData) return fromInitData;
 
   const searchParams = new URLSearchParams(window.location.search);
-  const fromSearch = searchParams.get('tgWebAppStartParam');
+  const fromSearch =
+    searchParams.get('tgWebAppStartParam') ||
+    searchParams.get('startapp') ||
+    searchParams.get('start_param');
   if (fromSearch) return fromSearch;
 
   if (window.location.hash) {
@@ -74,7 +131,10 @@ const getStartParamRaw = () => {
     if (queryIndex !== -1) {
       const hashQuery = hash.slice(queryIndex + 1);
       const hashParams = new URLSearchParams(hashQuery);
-      const fromHash = hashParams.get('tgWebAppStartParam');
+      const fromHash =
+        hashParams.get('tgWebAppStartParam') ||
+        hashParams.get('startapp') ||
+        hashParams.get('start_param');
       if (fromHash) return fromHash;
     }
   }
@@ -370,6 +430,8 @@ const handleDeepLinkAfterCardsLoad = () => {
 // Cards view
 const renderVisibleCards = () => {
   const visibleCards = getFilteredCards(cardsData);
+  const renderedCards = visibleCards.slice(0, visibleCardsLimit);
+  const hasMoreCards = visibleCards.length > renderedCards.length;
   const hasFilters = Boolean(currentFilter || currentSearchQuery.trim());
 
   renderCardsSummary(visibleCards);
@@ -392,7 +454,16 @@ const renderVisibleCards = () => {
     return;
   }
 
-  cardsListElement.innerHTML = visibleCards.map((card) => renderCard(card)).join('');
+  cardsListElement.innerHTML = `
+    ${renderedCards.map((card) => renderCard(card)).join('')}
+    ${
+      hasMoreCards
+        ? `<button class="button button--outline cards-list__more" type="button" data-action="show-more-cards">
+            Показать ещё ${Math.min(CARD_RENDER_BATCH_SIZE, visibleCards.length - renderedCards.length)}
+          </button>`
+        : ''
+    }
+  `;
   attachSwipeListeners();
 };
 
@@ -405,9 +476,11 @@ async function loadCards() {
     const result = await apiCall(`/api/miniapp/cards${params}`);
     cardsData = result.data || [];
     cardsLoaded = true;
+    visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
 
-    renderVisibleCards();
-    handleDeepLinkAfterCardsLoad();
+    if (!handleDeepLinkAfterCardsLoad()) {
+      renderVisibleCards();
+    }
   } catch (error) {
     console.error('Error loading cards:', error);
     renderCardsSummary([]);
@@ -1212,6 +1285,13 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 cardsListElement.addEventListener('click', (event) => {
+  const showMoreButton = event.target.closest('[data-action="show-more-cards"]');
+  if (showMoreButton) {
+    visibleCardsLimit += CARD_RENDER_BATCH_SIZE;
+    renderVisibleCards();
+    return;
+  }
+
   const inlineSendReminderButton = event.target.closest('[data-action="send-reminder-inline"]');
   if (inlineSendReminderButton) {
     event.preventDefault();
@@ -1344,6 +1424,7 @@ document.addEventListener(
 statusFilterElement?.addEventListener('change', (e) => {
   currentFilter = e.target.value;
   currentSearchQuery = '';
+  visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
   if (cardsSearchInputElement) {
     cardsSearchInputElement.value = '';
   }
@@ -1352,6 +1433,7 @@ statusFilterElement?.addEventListener('change', (e) => {
 
 cardsSearchInputElement?.addEventListener('input', (e) => {
   currentSearchQuery = e.target.value || '';
+  visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
   if (searchDebounceTimer) {
     clearTimeout(searchDebounceTimer);
   }
@@ -1373,6 +1455,7 @@ cardsClearFiltersButton?.addEventListener('click', () => {
   currentFilter = '';
   currentSearchQuery = '';
   currentSortMode = 'nextReviewAsc';
+  visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
   if (statusFilterElement) statusFilterElement.value = '';
   if (cardsSearchInputElement) cardsSearchInputElement.value = '';
   if (cardsSortElement) cardsSortElement.value = 'nextReviewAsc';
@@ -1381,6 +1464,7 @@ cardsClearFiltersButton?.addEventListener('click', () => {
 
 cardsSortElement?.addEventListener('change', (e) => {
   currentSortMode = e.target.value;
+  visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
   renderVisibleCards();
 });
 
