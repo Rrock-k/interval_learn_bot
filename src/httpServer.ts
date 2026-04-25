@@ -92,6 +92,12 @@ export const createHttpServer = (
   app.use(cookieParser());
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+  app.use('/miniapp', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true, timestamp: new Date().toISOString() });
@@ -236,6 +242,28 @@ export const createHttpServer = (
     }
   });
 
+  app.get('/api/miniapp/cards/:id', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const cardId = req.params.id;
+
+    if (!cardId) {
+      res.status(400).json({ error: 'Card ID required' });
+      return;
+    }
+
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.userId !== userId) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
+      res.json({ data: card });
+    } catch (error) {
+      logger.error('Error loading card for Mini App', error);
+      res.status(404).json({ error: 'Card not found' });
+    }
+  });
+
   app.get('/api/miniapp/cards/:id/media', requireMiniAppAuth, async (req, res) => {
     const userId = (req as any).userId;
     const cardId = req.params.id;
@@ -371,6 +399,18 @@ export const createHttpServer = (
   });
 
   // Serve static files (including Mini App assets) - must be before auth middleware
+  app.use(
+    '/miniapp',
+    express.static(path.join(publicDir, 'miniapp'), {
+      etag: false,
+      lastModified: false,
+      setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      },
+    }),
+  );
   app.use(express.static(publicDir));
 
   // Dashboard routes (require dashboard auth)

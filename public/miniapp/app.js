@@ -1,7 +1,16 @@
 // Telegram WebApp initialization
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
+const tg = window.Telegram?.WebApp || {
+  initData: '',
+  initDataUnsafe: {},
+  themeParams: {},
+  ready() {},
+  expand() {},
+  showAlert(message) {
+    window.alert(message);
+  },
+};
+tg.ready?.();
+tg.expand?.();
 
 const hexToRgb = (value) => {
   if (!value || typeof value !== 'string') return null;
@@ -400,31 +409,52 @@ function switchView(viewName) {
   
   // Load view content
   if (viewName === 'cards' && !cardsLoaded) {
-    loadCards();
+    void loadCards();
   } else if (viewName === 'calendar') {
     // Reset calendar to current month when switching to calendar view
     calendarMonth = new Date();
     calendarSelectedDate = null;
-    loadCalendar();
+    void loadCalendar();
   } else if (viewName === 'stats') {
-    loadStats();
+    void loadStats();
   }
 }
 
-const handleDeepLinkAfterCardsLoad = () => {
+const loadCardById = async (cardId) => {
+  const existingCard = cardsData.find((card) => card.id === cardId);
+  if (existingCard) return existingCard;
+
+  const result = await apiCall(`/api/miniapp/cards/${cardId}`);
+  const card = result.data;
+  if (card && !cardsData.some((item) => item.id === card.id)) {
+    cardsData = [card, ...cardsData];
+  }
+  return card;
+};
+
+const handleDeepLinkAfterCardsLoad = async () => {
   if (deepLinkHandled || !initialDeepLink) return false;
   if (initialDeepLink.type !== 'card') return false;
 
-  const targetCard = cardsData.find((card) => card.id === initialDeepLink.cardId);
-  if (!targetCard) {
+  try {
+    const targetCard = await loadCardById(initialDeepLink.cardId);
+    if (!targetCard) {
+      tg.showAlert('Карточка не найдена. Возможно, она удалена или доступ ограничен.');
+      deepLinkHandled = true;
+      return true;
+    }
+
+    currentCardId = targetCard.id;
+    renderCardDetail(targetCard);
+    switchView('card-detail');
+    deepLinkHandled = true;
+    return true;
+  } catch (error) {
+    console.error('Failed to open deep link card', error);
     tg.showAlert('Карточка не найдена. Возможно, она удалена или доступ ограничен.');
     deepLinkHandled = true;
     return true;
   }
-
-  openCardDetail(targetCard.id);
-  deepLinkHandled = true;
-  return true;
 };
 
 // Cards view
@@ -478,7 +508,8 @@ async function loadCards() {
     cardsLoaded = true;
     visibleCardsLimit = CARD_RENDER_BATCH_SIZE;
 
-    if (!handleDeepLinkAfterCardsLoad()) {
+    const deepLinkWasHandled = await handleDeepLinkAfterCardsLoad();
+    if (!deepLinkWasHandled) {
       renderVisibleCards();
     }
   } catch (error) {
@@ -597,7 +628,7 @@ const formatValue = (value) => {
   return String(value);
 };
 
-const buildMessageLink =
+const miniAppBuildMessageLink =
   (window && window.buildMessageLink) ||
   ((chatIdRaw, messageIdRaw) => {
     if (!chatIdRaw || !messageIdRaw) return null;
@@ -617,18 +648,18 @@ const buildMessageLink =
     return `tg://openmessage?user_id=${chatId}&message_id=${messageId}`;
   });
 
-const getMessageLink =
+const miniAppGetMessageLink =
   (window && window.getMessageLink) ||
   ((card) => {
     if (!card) return null;
     if (card?.status === 'awaiting_grade') {
-      const pendingLink = buildMessageLink(card.pendingChannelId, card.pendingChannelMessageId);
+      const pendingLink = miniAppBuildMessageLink(card.pendingChannelId, card.pendingChannelMessageId);
       if (pendingLink) {
         return pendingLink;
       }
     }
 
-    return buildMessageLink(card.sourceChatId, card.sourceMessageId);
+    return miniAppBuildMessageLink(card.sourceChatId, card.sourceMessageId);
   });
 
 const openTelegramLink = (url) => {

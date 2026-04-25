@@ -79,12 +79,7 @@ button {
 }
 
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
   padding: 12px 16px 8px;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(16px);
 }
 
 .topbar__content {
@@ -113,8 +108,8 @@ button {
 
 .view-tabs {
   position: sticky;
-  top: 85px;
-  z-index: 19;
+  top: 0;
+  z-index: 20;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 4px;

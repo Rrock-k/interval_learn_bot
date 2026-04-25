@@ -13,6 +13,7 @@
   padding-right: 18px;
   background: color-mix(in srgb, var(--primary) 10%, var(--background));
   opacity: 0;
+  pointer-events: none;
   transition: opacity 160ms ease;
 }
 
