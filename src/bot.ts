@@ -91,35 +91,67 @@ const isReviewManagedCard = (status: string): boolean => {
   return status === 'learning' || status === 'awaiting_grade';
 };
 
-const parseMessage = (message: Message): ParsedMessageInfo | null => {
-  if ('text' in message && message.text) {
+export const normalizeContentPreview = (value: string | null): string | null => {
+  if (value === null) return null;
+  const normalized = value.trim();
+  return normalized === '' ? null : normalized;
+};
+
+export const parseMessage = (message: Message): ParsedMessageInfo | null => {
+  if ('text' in message && typeof message.text === 'string') {
+    const preview = normalizeContentPreview(message.text);
     return {
       contentType: 'text',
-      preview: message.text.slice(0, 200),
+      preview: preview ? preview.slice(0, 200) : null,
       fileId: null,
       fileUniqueId: null,
     };
   }
-  if ('photo' in message && message.photo?.length) {
-    const caption = message.caption ?? '';
-    const sorted = [...message.photo].sort(
-      (a, b) => (a.file_size ?? 0) - (b.file_size ?? 0),
-    );
+  if ('photo' in message && Array.isArray(message.photo) && message.photo.length) {
+    const photos = message.photo
+      .map((photo) => {
+        if (!photo || typeof photo !== 'object') {
+          return null;
+        }
+        const fileId = photo.file_id;
+        if (typeof fileId !== 'string' || fileId.trim() === '') {
+          return null;
+        }
+        const fileSize = typeof photo.file_size === 'number' && Number.isFinite(photo.file_size) ? photo.file_size : 0;
+        const fileUniqueId =
+          typeof photo.file_unique_id === 'string' ? photo.file_unique_id : '';
+        return { file_id: fileId, file_size: fileSize, file_unique_id: fileUniqueId };
+      })
+      .filter((photo): photo is { file_id: string; file_size: number; file_unique_id: string } => Boolean(photo));
+    if (!photos.length) {
+      return null;
+    }
+    const sorted = photos.sort((a, b) => a.file_size - b.file_size);
     const target = sorted[0]!;
+    const caption = normalizeContentPreview(message.caption ?? null);
     return {
       contentType: 'photo',
-      preview: caption.slice(0, 200) || '[Фото]',
+      preview: caption ? caption.slice(0, 200) : '[Фото]',
       fileId: target.file_id,
       fileUniqueId: target.file_unique_id,
     };
   }
-  if ('video' in message && message.video) {
-    const caption = message.caption ?? '';
+  if (
+    'video' in message &&
+    message.video &&
+    typeof message.video === 'object' &&
+    'file_id' in message.video
+  ) {
+    const video = message.video as { file_id?: unknown; file_unique_id?: unknown };
+    if (typeof video.file_id !== 'string' || video.file_id.trim() === '') {
+      return null;
+    }
+    const caption = normalizeContentPreview(message.caption ?? null);
     return {
       contentType: 'video',
-      preview: caption.slice(0, 200) || '[Видео]',
-      fileId: message.video.file_id,
-      fileUniqueId: message.video.file_unique_id,
+      preview: caption ? caption.slice(0, 200) : '[Видео]',
+      fileId: video.file_id,
+      fileUniqueId: typeof video.file_unique_id === 'string' ? video.file_unique_id : video.file_id,
     };
   }
   return null;
@@ -128,15 +160,26 @@ const parseMessage = (message: Message): ParsedMessageInfo | null => {
 const buildMediaGroupKey = (chatId: number | string, mediaGroupId: string) =>
   `${chatId}:${mediaGroupId}`;
 
-const selectMediaGroupMessage = (messages: Message[]) => {
-  const withCaption = messages.find(
-    (message) => 'caption' in message && message.caption?.trim(),
+const hasTextualCaption = (message: Message) => {
+  return (
+    'caption' in message &&
+    typeof message.caption === 'string' &&
+    message.caption.trim()
   );
+};
+
+const selectMediaGroupMessage = (messages: Message[]) => {
+  const parsedMessages = messages.filter((message) => parseMessage(message));
+  if (!parsedMessages.length) {
+    return null;
+  }
+  const withCaption = parsedMessages.find(hasTextualCaption);
   if (withCaption) {
     return withCaption;
   }
-  let selected = messages[0]!;
-  for (const message of messages) {
+
+  let selected = parsedMessages[0]!;
+  for (const message of parsedMessages) {
     if (message.message_id < selected.message_id) {
       selected = message;
     }
@@ -148,7 +191,7 @@ const countMediaGroupItems = (messages: Message[]) => {
   let photoCount = 0;
   let videoCount = 0;
   for (const message of messages) {
-    if ('photo' in message && message.photo?.length) {
+    if ('photo' in message && Array.isArray(message.photo) && message.photo.length) {
       photoCount += 1;
       continue;
     }
@@ -177,11 +220,14 @@ const buildMediaGroupFallbackPreview = (counts: {
   return `[Медиа x${counts.total}]`;
 };
 
-const parseMediaGroup = (messages: Message[]): ParsedMessageInfo | null => {
+export const parseMediaGroup = (messages: Message[]): ParsedMessageInfo | null => {
   if (!messages.length) {
     return null;
   }
   const primary = selectMediaGroupMessage(messages);
+  if (!primary) {
+    return null;
+  }
   const parsed = parseMessage(primary);
   if (!parsed) {
     return null;

@@ -95,6 +95,7 @@ export class ReviewScheduler {
   }
 
   private async sendCardToChannel(card: CardRecord, reason: NotificationReason) {
+    let targetChatId = card.userId;
     try {
       if (card.pendingChannelId && card.pendingChannelMessageId) {
         await this.cleanupPendingMessage(card);
@@ -104,11 +105,105 @@ export class ReviewScheduler {
 
       // Determine target chat ID
       const user = await withDbRetry(() => this.store.getUser(card.userId));
-      const targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
+      targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
 
       const keyboard = buildReviewKeyboard(card.id);
       let pendingMessageId: number;
       let wasCopied = false;
+      const reminderText = '🔔 Время повторить запись';
+
+      const normalizePreview = (value?: string | null): string | null => {
+        const normalized = (value ?? '').trim();
+        return normalized === '' ? null : normalized;
+      };
+
+      const sendReminderDetached = async () => {
+        const reminder = await this.bot.telegram.sendMessage(targetChatId, reminderText, {
+          reply_markup: keyboard.reply_markup,
+        });
+        return reminder.message_id;
+      };
+
+      const sendReminderWithReply = async (
+        baseMessageId: number,
+        options: { fallbackToDetached?: boolean } = {},
+      ) => {
+        try {
+          const reminder = await this.bot.telegram.sendMessage(
+            targetChatId,
+            reminderText,
+            {
+              reply_markup: keyboard.reply_markup,
+              reply_parameters: {
+                message_id: baseMessageId,
+                allow_sending_without_reply: false,
+              },
+            },
+          );
+          if (!reminder.reply_to_message) {
+            throw new Error('replied message not found');
+          }
+          return reminder.message_id;
+        } catch (error) {
+          if (options.fallbackToDetached !== false && this.isMissingReplyTarget(error)) {
+            return sendReminderDetached();
+          }
+          throw error;
+        }
+      };
+
+      const sendStoredBaseMessage = async () => {
+        const preview =
+          normalizePreview(card.contentPreview) ??
+          (card.contentType === 'photo'
+            ? '[Фото]'
+            : card.contentType === 'video'
+              ? '[Видео]'
+              : 'Карточка без текста');
+        let messageId: number;
+        if (card.contentType === 'photo' && card.contentFileId) {
+          try {
+            const baseMessage = await this.bot.telegram.sendPhoto(
+              targetChatId,
+              card.contentFileId,
+              { caption: preview.slice(0, 1024) },
+            );
+            messageId = baseMessage.message_id;
+          } catch (error) {
+            logger.warn(`Не удалось отправить фото карточки ${card.id} как базу`, error);
+            const baseMessage = await this.bot.telegram.sendMessage(
+              targetChatId,
+              preview,
+            );
+            messageId = baseMessage.message_id;
+          }
+        } else if (card.contentType === 'video' && card.contentFileId) {
+          try {
+            const baseMessage = await this.bot.telegram.sendVideo(
+              targetChatId,
+              card.contentFileId,
+              { caption: preview.slice(0, 1024) },
+            );
+            messageId = baseMessage.message_id;
+          } catch (error) {
+            logger.warn(`Не удалось отправить видео карточки ${card.id} как базу`, error);
+            const baseMessage = await this.bot.telegram.sendMessage(
+              targetChatId,
+              preview,
+            );
+            messageId = baseMessage.message_id;
+          }
+        } else {
+          const baseMessage = await this.bot.telegram.sendMessage(targetChatId, preview);
+          messageId = baseMessage.message_id;
+        }
+        card.baseChannelMessageId = messageId;
+        await withDbRetry(() =>
+          this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
+        );
+        return messageId;
+      };
+
       const copyOriginal = async () => {
         const sourceIds = (card.sourceMessageIds || [])
           .map((id) => Number(id))
@@ -128,26 +223,12 @@ export class ReviewScheduler {
           await withDbRetry(() =>
             this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
           );
-          const prompt = await this.bot.telegram.sendMessage(
-            targetChatId,
-            '🔔 Время повторить запись',
-            {
-              reply_markup: keyboard.reply_markup,
-              reply_parameters: {
-                message_id: lastCopiedId,
-                allow_sending_without_reply: true,
-              },
-            },
-          );
-          return prompt.message_id;
+          return card.baseChannelMessageId;
         }
         const response = await this.bot.telegram.copyMessage(
           targetChatId,
           card.sourceChatId,
           card.sourceMessageId,
-          {
-            reply_markup: keyboard.reply_markup,
-          },
         );
         card.baseChannelMessageId = response.message_id;
         await withDbRetry(() =>
@@ -157,36 +238,43 @@ export class ReviewScheduler {
       };
 
       if (!card.baseChannelMessageId) {
-        pendingMessageId = await copyOriginal();
-        wasCopied = true;
+        try {
+          const baseMessageId = await copyOriginal();
+          wasCopied = true;
+          pendingMessageId = await sendReminderWithReply(baseMessageId);
+        } catch (error) {
+          logger.warn(
+            `Не удалось скопировать исходное сообщение для карточки ${card.id}, создаю базу из сохранённых данных`,
+            error,
+          );
+          const baseMessageId = await sendStoredBaseMessage();
+          wasCopied = false;
+          pendingMessageId = await sendReminderWithReply(baseMessageId);
+        }
       } else {
         try {
-          const reminder = await this.bot.telegram.sendMessage(
-            targetChatId,
-            '🔔 Время повторить запись',
-            {
-              reply_markup: keyboard.reply_markup,
-              reply_parameters: {
-                message_id: card.baseChannelMessageId,
-                allow_sending_without_reply: true,
-              },
-            },
-          );
-          if (!reminder.reply_to_message) {
-            await this.deleteMessageSafe(reminder.chat.id, reminder.message_id);
-            pendingMessageId = await copyOriginal();
-            wasCopied = true;
-          } else {
-            pendingMessageId = reminder.message_id;
-          }
+          pendingMessageId = await sendReminderWithReply(card.baseChannelMessageId, {
+            fallbackToDetached: false,
+          });
         } catch (err) {
           if (this.isMissingReplyTarget(err)) {
             logger.warn(
               `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
             );
             await withDbRetry(() => this.store.setBaseChannelMessage(card.id, null));
-            pendingMessageId = await copyOriginal();
-            wasCopied = true;
+            try {
+              const baseMessageId = await copyOriginal();
+              wasCopied = true;
+              pendingMessageId = await sendReminderWithReply(baseMessageId);
+            } catch (error) {
+              logger.warn(
+                `Не удалось скопировать исходное сообщение после падения ответа для карточки ${card.id}, создаю базу из сохранённых данных`,
+                error,
+              );
+              const baseMessageId = await sendStoredBaseMessage();
+              wasCopied = false;
+              pendingMessageId = await sendReminderWithReply(baseMessageId);
+            }
           } else {
             throw err;
           }
@@ -214,6 +302,17 @@ export class ReviewScheduler {
       );
     } catch (error) {
       logger.error(`Не удалось отправить карточку ${card.id}`, error);
+      try {
+        const errorMessage =
+          error instanceof Error ? error.message : 'неизвестная ошибка';
+        const compactMessage = errorMessage.replace(/\s+/g, ' ').slice(0, 240);
+        await this.bot.telegram.sendMessage(
+          targetChatId,
+          `⚠ Не удалось отправить напоминание по карточке ${card.id}. Ошибка: ${compactMessage}`,
+        );
+      } catch (notifyErr) {
+        logger.warn(`Не удалось отправить уведомление об ошибке карточки ${card.id}`, notifyErr);
+      }
       const retryAt = dayjs().add(1, 'hour').toISOString();
       await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
     }
@@ -221,18 +320,29 @@ export class ReviewScheduler {
 
   private async markMessageNotViewed(card: CardRecord) {
     if (!card.pendingChannelId || !card.pendingChannelMessageId) return;
-    const chatId = card.pendingChannelId;
-    const messageId = card.pendingChannelMessageId;
+    const isActualCardMessage =
+      card.baseChannelMessageId !== null &&
+      card.baseChannelMessageId === card.pendingChannelMessageId;
+    if (isActualCardMessage) {
+      return;
+    }
+
     const label = '⏭ Не просмотрено — отправлено снова';
     try {
       await this.bot.telegram.editMessageText(
-        chatId, messageId, undefined, label,
+        card.pendingChannelId,
+        card.pendingChannelMessageId,
+        undefined,
+        label,
         { reply_markup: { inline_keyboard: [] } },
       );
     } catch {
       try {
         await this.bot.telegram.editMessageCaption(
-          chatId, messageId, undefined, label,
+          card.pendingChannelId,
+          card.pendingChannelMessageId,
+          undefined,
+          label,
           { reply_markup: { inline_keyboard: [] } },
         );
       } catch (err) {
@@ -257,12 +367,58 @@ export class ReviewScheduler {
   }
 
   private isMissingReplyTarget(err: unknown): boolean {
-    if (!(err instanceof Error) || !err.message) {
+    const description = this.extractErrorDescription(err);
+    if (!description) {
       return false;
     }
-    return /reply message not found|message to reply not found|replied message not found/i.test(
-      err.message,
+    const fullText = [description].join(' ');
+    return /reply message not found|message to reply not found|replied message not found|message is not found/i.test(
+      fullText,
     );
+  }
+
+  private extractErrorDescription(error: unknown): string | null {
+    if (!error || typeof error !== 'object') {
+      if (typeof error === 'string') return error;
+      return null;
+    }
+
+    const asError = error as {
+      message?: unknown;
+      description?: unknown;
+      cause?: unknown;
+      response?: unknown;
+    };
+
+    const candidates: unknown[] = [
+      asError.message,
+      asError.description,
+      asError.cause,
+      asError.response,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string') {
+        return candidate;
+      }
+      if (candidate && typeof candidate === 'object') {
+        const asObject = candidate as {
+          description?: unknown;
+          message?: unknown;
+        };
+        if (typeof asObject.description === 'string') {
+          return asObject.description;
+        }
+        if (typeof asObject.message === 'string') {
+          return asObject.message;
+        }
+        if (typeof asObject.response !== 'undefined') {
+          const nested = this.extractErrorDescription(asObject.response);
+          if (nested) return nested;
+        }
+      }
+    }
+    return null;
   }
 
   private async deleteMessageSafe(chatId: string | number, messageId: number) {

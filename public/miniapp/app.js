@@ -276,22 +276,39 @@ const formatValue = (value) => {
   return String(value);
 };
 
-const getMessageLink = (card) => {
-  if (!card?.sourceChatId || !card?.sourceMessageId) return null;
-  const chatId = String(card.sourceChatId);
-  const messageId = card.sourceMessageId;
+const buildMessageLink =
+  (window && window.buildMessageLink) ||
+  ((chatIdRaw, messageIdRaw) => {
+    if (!chatIdRaw || !messageIdRaw) return null;
 
-  if (chatId.startsWith('-100')) {
-    const internalId = chatId.slice(4);
-    return `https://t.me/c/${internalId}/${messageId}`;
-  }
+    const chatId = String(chatIdRaw);
+    const messageId = Number(messageIdRaw);
+    if (!Number.isInteger(messageId) || messageId <= 0) return null;
 
-  if (chatId.startsWith('-')) {
-    return null;
-  }
+    if (chatId.startsWith('-100')) {
+      return `https://t.me/c/${chatId.slice(4)}/${messageId}`;
+    }
 
-  return `tg://openmessage?user_id=${chatId}&message_id=${messageId}`;
-};
+    if (chatId.startsWith('-')) {
+      return null;
+    }
+
+    return `tg://openmessage?user_id=${chatId}&message_id=${messageId}`;
+  });
+
+const getMessageLink =
+  (window && window.getMessageLink) ||
+  ((card) => {
+    if (!card) return null;
+    if (card?.status === 'awaiting_grade') {
+      const pendingLink = buildMessageLink(card.pendingChannelId, card.pendingChannelMessageId);
+      if (pendingLink) {
+        return pendingLink;
+      }
+    }
+
+    return buildMessageLink(card.sourceChatId, card.sourceMessageId);
+  });
 
 const openTelegramLink = (url) => {
   if (!url) return;
