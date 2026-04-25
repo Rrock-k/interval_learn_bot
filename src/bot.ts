@@ -15,6 +15,7 @@ import {
   buildAdjustKeyboard,
   buildReviewKeyboard,
   buildSchedulePickerKeyboard,
+  buildReminderManagementKeyboard,
   buildWeekdayPickerKeyboard,
   REVIEW_ACTIONS,
   CARD_ACTIONS,
@@ -85,6 +86,10 @@ interface MediaGroupBuffer {
 
 const isCommandText = (text?: string | null) =>
   Boolean(text && text.startsWith('/'));
+
+const isReviewManagedCard = (status: string): boolean => {
+  return status === 'learning' || status === 'awaiting_grade';
+};
 
 const parseMessage = (message: Message): ParsedMessageInfo | null => {
   if ('text' in message && message.text) {
@@ -357,6 +362,19 @@ export const createBot = (store: CardStore) => {
       markMediaGroupProcessed(key);
       void handleMediaGroup(entry);
     }, MEDIA_GROUP_DEBOUNCE_MS);
+  };
+
+  const getReviewManagedCard = async (cardId: string) => {
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (!isReviewManagedCard(card.status)) {
+        return null;
+      }
+      return card;
+    } catch (error) {
+      logger.warn('Не удалось загрузить карточку для управления', error);
+      return null;
+    }
   };
 
   // Authorization Middleware
@@ -936,7 +954,7 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    const card = await getReviewManagedCard(cardId);
     if (!card) {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
@@ -962,15 +980,21 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    const card = await getReviewManagedCard(cardId);
     if (!card) {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
     try {
-      await ctx.editMessageReplyMarkup(
-        buildReviewKeyboard(cardId).reply_markup,
-      );
+      if (card.status === 'awaiting_grade') {
+        await ctx.editMessageReplyMarkup(
+          buildReviewKeyboard(cardId).reply_markup,
+        );
+      } else {
+        await ctx.editMessageReplyMarkup(
+          buildReminderManagementKeyboard(cardId).reply_markup,
+        );
+      }
       await ctx.answerCbQuery();
     } catch (error) {
       logger.error('Не удалось вернуть основную клавиатуру', error);
@@ -984,9 +1008,9 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    const card = await getReviewManagedCard(cardId);
     if (!card) {
-      await ctx.answerCbQuery('Повтор уже обработан');
+      await ctx.answerCbQuery('Карточка уже обработана');
       return;
     }
     try {
@@ -1023,6 +1047,11 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
+    const card = await getReviewManagedCard(cardId);
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
+      return;
+    }
     try {
       await ctx.editMessageReplyMarkup(
         buildSchedulePickerKeyboard(cardId, 'r').reply_markup,
@@ -1045,6 +1074,11 @@ export const createBot = (store: CardStore) => {
 
     // "pick" code → show schedule picker (back from weekday picker)
     if (code === 'pick') {
+      const card = await getReviewManagedCard(cardId);
+      if (!card) {
+        await ctx.answerCbQuery('Повтор уже обработан');
+        return;
+      }
       try {
         await ctx.editMessageReplyMarkup(
           buildSchedulePickerKeyboard(cardId, 'r').reply_markup,
@@ -1057,7 +1091,7 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
-    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    const card = await getReviewManagedCard(cardId);
     if (!card) {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
@@ -1115,6 +1149,14 @@ export const createBot = (store: CardStore) => {
         }
       }
 
+      try {
+        await ctx.editMessageReplyMarkup(
+          buildReminderManagementKeyboard(cardId).reply_markup,
+        );
+      } catch (_error) {
+        // keep user-facing action even if editing fails
+      }
+
       const label = mode === 'sm2' ? 'SM-2' : scheduleModeLabel(mode, ruleStr);
       await ctx.answerCbQuery(
         `Расписание: ${label}. Следующее ${formatNextReviewMessage(nextReviewAt)}`,
@@ -1131,6 +1173,11 @@ export const createBot = (store: CardStore) => {
     const selectedStr = ctx.match?.[2] ?? '';
     if (!cardId) {
       await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const card = await getReviewManagedCard(cardId);
+    if (!card) {
+      await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
     try {
@@ -1158,7 +1205,7 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
-    const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+    const card = await getReviewManagedCard(cardId);
     if (!card) {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
@@ -1192,6 +1239,14 @@ export const createBot = (store: CardStore) => {
         }
       }
 
+      try {
+        await ctx.editMessageReplyMarkup(
+          buildReminderManagementKeyboard(cardId).reply_markup,
+        );
+      } catch (_error) {
+        // keep user-facing action even if editing fails
+      }
+
       await ctx.answerCbQuery(
         `Расписание: ${scheduleRuleLabel(rule)}. Следующее ${formatNextReviewMessage(nextReviewAt)}`,
       );
@@ -1211,7 +1266,7 @@ export const createBot = (store: CardStore) => {
         await ctx.answerCbQuery('Некорректное действие');
         return;
       }
-      const card = await withDbRetry(() => store.findAwaitingCard(cardId));
+      const card = await getReviewManagedCard(cardId);
       if (!card) {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
@@ -1240,6 +1295,13 @@ export const createBot = (store: CardStore) => {
               editError,
             );
           }
+        }
+        try {
+          await ctx.editMessageReplyMarkup(
+            buildReminderManagementKeyboard(cardId).reply_markup,
+          );
+        } catch (_error) {
+          // keep user-facing action even if editing fails
         }
         await ctx.answerCbQuery(
           `Готово! Следующее повторение ${formatNextReviewMessage(result.nextReviewAt)}`,
@@ -1291,6 +1353,13 @@ export const createBot = (store: CardStore) => {
               editError,
             );
           }
+        }
+        try {
+          await ctx.editMessageReplyMarkup(
+            buildReminderManagementKeyboard(cardId).reply_markup,
+          );
+        } catch (_error) {
+          // keep user-facing action even if editing fails
         }
         await ctx.answerCbQuery(
           `Готово! Следующее повторение ${formatNextReviewMessage(result.nextReviewAt)}`,

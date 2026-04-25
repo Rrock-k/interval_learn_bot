@@ -70,6 +70,16 @@ export const buildAdjustKeyboard = (cardId: string, deepLinkUrl?: string) => {
   return Markup.inlineKeyboard(rows);
 };
 
+export const buildReminderManagementKeyboard = (cardId: string) =>
+  Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        '⚙️ Настроить',
+        `${REVIEW_ACTIONS.adjust}|${cardId}`,
+      ),
+    ],
+  ]);
+
 // --- Schedule picker keyboards ---
 
 /**
