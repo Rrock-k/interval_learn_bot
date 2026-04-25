@@ -4,19 +4,59 @@ tg.ready();
 tg.expand();
 
 // Apply Telegram theme
-document.documentElement.style.setProperty('--tg-theme-bg-color', tg.themeParams.bg_color || '#ffffff');
-document.documentElement.style.setProperty('--tg-theme-text-color', tg.themeParams.text_color || '#000000');
-document.documentElement.style.setProperty('--tg-theme-hint-color', tg.themeParams.hint_color || '#999999');
-document.documentElement.style.setProperty('--tg-theme-link-color', tg.themeParams.link_color || '#2481cc');
-document.documentElement.style.setProperty('--tg-theme-button-color', tg.themeParams.button_color || '#2481cc');
-document.documentElement.style.setProperty('--tg-theme-button-text-color', tg.themeParams.button_text_color || '#ffffff');
-document.documentElement.style.setProperty('--tg-theme-secondary-bg-color', tg.themeParams.secondary_bg_color || '#f4f4f5');
+const applyTheme = () => {
+  const params = tg.themeParams || {};
+  const set = (name, paramName, fallback) =>
+    document.documentElement.style.setProperty(name, params[paramName] || fallback);
+
+  set('--tg-theme-bg-color', 'bg_color', '#ffffff');
+  set('--tg-theme-text-color', 'text_color', '#0f172a');
+  set('--tg-theme-hint-color', 'hint_color', '#64748b');
+  set('--tg-theme-link-color', 'link_color', '#2563eb');
+  set('--tg-theme-button-color', 'button_color', '#2563eb');
+  set('--tg-theme-button-text-color', 'button_text_color', '#ffffff');
+  set('--tg-theme-secondary-bg-color', 'secondary_bg_color', '#f8fafc');
+
+  const bg = document.documentElement.style.getPropertyValue('--tg-theme-bg-color');
+  const text = document.documentElement.style.getPropertyValue('--tg-theme-text-color');
+  const hint = document.documentElement.style.getPropertyValue('--tg-theme-hint-color');
+  const resolvedBg = bg || '#ffffff';
+  const resolvedText = text || '#0f172a';
+  const resolvedHint = hint || '#64748b';
+
+  document.documentElement.style.setProperty('--background', resolvedBg);
+  document.documentElement.style.setProperty('--foreground', resolvedText);
+  document.documentElement.style.setProperty('--muted-foreground', resolvedHint);
+  document.documentElement.style.setProperty('--card', resolvedBg);
+  document.documentElement.style.setProperty('--popover', resolvedBg);
+  document.documentElement.style.setProperty('--card-foreground', resolvedText);
+  document.documentElement.style.setProperty('--popover-foreground', resolvedText);
+};
+
+applyTheme();
+if (typeof tg.onEvent === 'function') {
+  tg.onEvent('themeChanged', applyTheme);
+}
 
 // State
 let currentView = 'cards';
 let cardsData = [];
 let currentFilter = '';
+let currentSortMode = 'nextReviewAsc';
+let currentSearchQuery = '';
 let currentCardId = null;
+let cardsLoaded = false;
+let searchDebounceTimer = null;
+const actionLocks = new Set();
+
+const cardsSummary = document.getElementById('cardsSummary');
+const cardsHintElement = document.getElementById('cardsHint');
+const cardsListElement = document.getElementById('cardsList');
+const statusFilterElement = document.getElementById('statusFilter');
+const cardsSearchInputElement = document.getElementById('cardsSearch');
+const cardsSortElement = document.getElementById('cardsSort');
+const cardsRefreshButton = document.getElementById('cardsRefreshBtn');
+const cardsClearFiltersButton = document.getElementById('cardsClearFiltersBtn');
 
 const getStartParamRaw = () => {
   const fromInitData = tg?.initDataUnsafe?.start_param;
@@ -94,56 +134,188 @@ const statusName = {
   archived: 'Архив',
 };
 
+const statusChipClass = {
+  pending: 'status-chip--pending',
+  learning: 'status-chip--learning',
+  awaiting_grade: 'status-chip--awaiting_grade',
+  archived: 'status-chip--archived',
+};
+
 const notificationReasonLabel = {
   scheduled: 'по расписанию',
   manual_now: 'вручную',
   manual_override: 'дата вручную',
 };
 
-// API helper
+const renderCardsSummary = (cards) => {
+  if (!cardsSummary) return;
+  const total = cards.length;
+  let dueToday = 0;
+  let overdue = 0;
+  let awaitingGrade = 0;
+
+  const today = toDateKey(new Date());
+
+  cards.forEach((card) => {
+    if (card.status === 'awaiting_grade') {
+      awaitingGrade += 1;
+    }
+    if (!card.nextReviewAt) {
+      return;
+    }
+
+    const reviewKey = toDateKey(card.nextReviewAt);
+    if (reviewKey < today) {
+      overdue += 1;
+    }
+    if (reviewKey === today) {
+      dueToday += 1;
+    }
+  });
+
+  cardsSummary.innerHTML = `
+    <span class="summary-chip">Всего: ${total}</span>
+    <span class="summary-chip">Сегодня: ${dueToday}</span>
+    <span class="summary-chip">Просрочены: ${overdue}</span>
+    <span class="summary-chip">Ожидают оценки: ${awaitingGrade}</span>
+  `;
+};
+
+const updateCardsHint = (cardsCount, hasFilters) => {
+  if (!cardsHintElement) return;
+
+  let hintText = 'Подсказка: тапните карточку для подробностей и действий.';
+  if (hasFilters) {
+    hintText =
+      'Подсказка: включены фильтр или поиск. Сбросьте фильтры, чтобы увидеть все карточки.';
+  }
+  if (cardsCount === 0) {
+    hintText =
+      'Подсказка: карточек не найдено. Проверьте фильтры или обновите список.';
+  }
+  cardsHintElement.innerHTML = `<div class="toolbar__helper-chip">${escapeHtml(hintText)}</div>`;
+};
+
+const getSortedCards = (cards) => {
+  const copy = [...cards];
+  const safeDateValue = (iso) => {
+    const ms = iso ? new Date(iso).getTime() : Number.NaN;
+    return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+  };
+
+  if (currentSortMode === 'nextReviewDesc') {
+    copy.sort(
+      (a, b) => safeDateValue(b.nextReviewAt) - safeDateValue(a.nextReviewAt),
+    );
+  } else if (currentSortMode === 'updatedDesc') {
+    copy.sort((a, b) => safeDateValue(b.updatedAt) - safeDateValue(a.updatedAt));
+  } else if (currentSortMode === 'repetitionDesc') {
+    copy.sort((a, b) => Number(b.repetition || 0) - Number(a.repetition || 0));
+  } else {
+    copy.sort((a, b) => safeDateValue(a.nextReviewAt) - safeDateValue(b.nextReviewAt));
+  }
+
+  return copy;
+};
+
+const getFilteredCards = (cards) => {
+  const query = currentSearchQuery.trim().toLowerCase();
+  if (!query) return getSortedCards(cards);
+
+  return getSortedCards(
+    cards.filter((card) => (card.contentPreview || '').toLowerCase().includes(query)),
+  );
+};
+
 async function apiCall(endpoint, options = {}) {
-  // Debug logging
-  console.log('[API] Calling:', endpoint);
-  console.log('[API] initData exists:', !!tg.initData);
-  console.log('[API] initData length:', tg.initData?.length || 0);
-  
   if (!tg.initData) {
-    console.error('[API] No initData available!');
     throw new Error('Telegram initData не доступен. Откройте приложение через бота.');
   }
-  
+
   const url = `${window.location.origin}${endpoint}`;
   const headers = {
     'Content-Type': 'application/json',
     'X-Telegram-Init-Data': tg.initData,
   };
-  
-  console.log('[API] Request URL:', url);
-  console.log('[API] Headers:', { 'Content-Type': headers['Content-Type'], 'X-Telegram-Init-Data': 'exists' });
-  
-  try {
-    const response = await fetch(url, {
-      ...options,
-      headers: { ...headers, ...options.headers },
-    });
-    
-    console.log('[API] Response status:', response.status);
-    console.log('[API] Response ok:', response.ok);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('[API] Error response:', errorText);
-      throw new Error(`API Error ${response.status}: ${errorText}`);
-    }
-    
-    const data = await response.json();
-    console.log('[API] Success:', data);
-    return data;
-  } catch (error) {
-    console.error('[API] Exception:', error);
-    throw error;
+
+  const response = await fetch(url, {
+    ...options,
+    headers: { ...headers, ...options.headers },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API Error ${response.status}: ${errorText}`);
   }
+
+  return response.json();
 }
+
+const parseApiError = (error) => {
+  if (!error) return { status: 0, message: 'Неизвестная ошибка' };
+  if (error instanceof Error) {
+    const match = /API Error (\d+): (.*)/.exec(error.message);
+    if (match) {
+      const status = Number(match[1]);
+      const rawMessage = match[2] || error.message;
+      try {
+        const parsed = JSON.parse(rawMessage);
+        if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+          return { status, message: parsed.error };
+        }
+      } catch {
+        // ignore
+      }
+      return { status, message: rawMessage };
+    }
+  }
+  return { status: 0, message: `${error}` };
+};
+
+const getErrorMessage = (error) => {
+  const parsed = parseApiError(error);
+  return parsed.message || 'Неизвестная ошибка';
+};
+
+const setBusyButtonState = (button, isBusy, pendingText = 'Подождите…') => {
+  if (!button || button.tagName !== 'BUTTON') return;
+  if (isBusy) {
+    if (!button.dataset.busy) {
+      button.dataset.busy = '0';
+      button.dataset.originalText = button.textContent || '';
+    }
+    button.classList.add('button--loading');
+    button.dataset.busy = '1';
+    button.disabled = true;
+    button.textContent = pendingText;
+    button.setAttribute('aria-busy', 'true');
+    return;
+  }
+
+  button.classList.remove('button--loading');
+  button.disabled = false;
+  if (button.dataset.originalText) {
+    button.textContent = button.dataset.originalText;
+    delete button.dataset.originalText;
+  }
+  button.removeAttribute('aria-busy');
+  button.dataset.busy = '0';
+};
+
+const runButtonAction = async ({ cardId, action, button, pendingText }, callback) => {
+  const key = `${String(cardId)}:${action}`;
+  if (actionLocks.has(key)) {
+    return false;
+  }
+  actionLocks.add(key);
+  setBusyButtonState(button, true, pendingText);
+  try {
+    return await callback();
+  } finally {
+    actionLocks.delete(key);
+    setBusyButtonState(button, false);
+  }
+};
 
 // View switching
 function switchView(viewName) {
@@ -157,6 +329,7 @@ function switchView(viewName) {
   document.querySelectorAll('.tab').forEach(tab => {
     const isActive = tab.dataset.view === activeTabView;
     tab.classList.toggle('tab--active', isActive);
+    tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
   });
   
   // Update views
@@ -166,7 +339,7 @@ function switchView(viewName) {
   });
   
   // Load view content
-  if (viewName === 'cards') {
+  if (viewName === 'cards' && !cardsLoaded) {
     loadCards();
   } else if (viewName === 'calendar') {
     // Reset calendar to current month when switching to calendar view
@@ -195,63 +368,111 @@ const handleDeepLinkAfterCardsLoad = () => {
 };
 
 // Cards view
+const renderVisibleCards = () => {
+  const visibleCards = getFilteredCards(cardsData);
+  const hasFilters = Boolean(currentFilter || currentSearchQuery.trim());
+
+  renderCardsSummary(visibleCards);
+  updateCardsHint(visibleCards.length, hasFilters);
+
+  if (visibleCards.length === 0) {
+    const hasActiveFilter = currentSearchQuery.trim() || currentFilter;
+    const hasTitle = hasActiveFilter ? 'Ничего не найдено' : 'Карточек пока нет';
+    const hasMessage = hasActiveFilter
+      ? 'Измените фильтр или текст поиска, чтобы увидеть карточки.'
+      : 'Добавьте напоминания в боте, и они появятся здесь автоматически.';
+
+    cardsListElement.innerHTML = `
+      <div class="empty">
+        <div class="empty__icon">📚</div>
+        <div class="empty__text">${hasTitle}</div>
+        <div class="empty__subtext">${hasMessage}</div>
+      </div>
+    `;
+    return;
+  }
+
+  cardsListElement.innerHTML = visibleCards.map((card) => renderCard(card)).join('');
+  attachSwipeListeners();
+};
+
 async function loadCards() {
-  const cardsList = document.getElementById('cardsList');
-  cardsList.innerHTML = '<div class="loading">Загрузка...</div>';
+  if (!cardsListElement) return;
+  cardsListElement.innerHTML = '<div class="loading">Загрузка...</div>';
   
   try {
     const params = currentFilter ? `?status=${currentFilter}` : '';
     const result = await apiCall(`/api/miniapp/cards${params}`);
     cardsData = result.data || [];
+    cardsLoaded = true;
 
+    renderVisibleCards();
     handleDeepLinkAfterCardsLoad();
-    
-    if (cardsData.length === 0) {
-      cardsList.innerHTML = `
-        <div class="empty">
-          <div class="empty__icon">📚</div>
-          <div class="empty__text">Карточек пока нет</div>
-        </div>
-      `;
-      return;
-    }
-    
-    cardsList.innerHTML = cardsData.map(card => renderCard(card)).join('');
-    attachSwipeListeners();
   } catch (error) {
     console.error('Error loading cards:', error);
-    cardsList.innerHTML = `
+    renderCardsSummary([]);
+    updateCardsHint(0, false);
+    const safeMessage = getErrorMessage(error);
+    cardsListElement.innerHTML = `
       <div class="empty">
         <div class="empty__icon">⚠️</div>
-        <div class="empty__text">Ошибка загрузки карточек</div>
-        <div class="empty__text" style="font-size: 12px; margin-top: 8px;">${escapeHtml(error.message)}</div>
+        <div class="empty__text">Не удалось загрузить карточки</div>
+        <div class="empty__subtext">${escapeHtml(safeMessage)}</div>
       </div>
     `;
   }
 }
 
 function renderCard(card) {
-  const nextReview = card.nextReviewAt 
-    ? new Date(card.nextReviewAt).toLocaleDateString('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
-    : '—';
-  
+  const nextReview = formatDateTimeShort(card.nextReviewAt);
   const isArchived = card.status === 'archived';
   const swipeLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
   const repetitionValue = Number.isFinite(card.repetition) ? card.repetition : 0;
-  
+  const status = statusChipClass[card.status] || 'status-chip--pending';
+  const hasDate = Boolean(card.nextReviewAt);
+  const actionLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
+  const canSendReminder = card.status === 'learning' || card.status === 'awaiting_grade';
+  const statusLabel = statusName[card.status] || 'Неизвестный статус';
+  const statusIcon = statusEmoji[card.status] || '📄';
+  const contentText = card.contentPreview || 'Без текста';
+
   return `
     <div class="card-swipe-container" data-card-id="${card.id}" data-archived="${isArchived}">
       <div class="card-swipe-background">
-        <div class="card-swipe-background__content">${swipeLabel}</div>
+        <div class="card-swipe-background__content"> ${swipeLabel}</div>
       </div>
-      <div class="card" data-card-id="${card.id}">
+      <div class="card" data-card-id="${card.id}" role="button" tabindex="0">
         <div class="card__header">
-          <span class="card__status">${statusEmoji[card.status]} ${statusName[card.status]}</span>
-          <span class="card__date">${nextReview}</span>
+          <span class="status-chip ${status}">
+            ${statusIcon} ${statusLabel}
+          </span>
+          <span class="card__date">${hasDate ? `След. повторение: ${nextReview}` : 'Без даты'}</span>
         </div>
-        <div class="card__content">${escapeHtml(card.contentPreview || 'Без текста')}</div>
+        <div class="card__content">${escapeHtml(contentText)}</div>
         <div class="card__meta">
           <span class="card__meta-item">🔁 ${repetitionValue}</span>
+        </div>
+        <div class="card__actions">
+          ${
+            canSendReminder
+              ? `<button
+            class="button button--outline button--sm"
+            type="button"
+            data-action="send-reminder-inline"
+            data-card-id="${card.id}"
+          >
+            🔔 Напомнить сейчас
+          </button>`
+              : ''
+          }
+          <button
+            class="button button--outline button--sm"
+            type="button"
+            data-action="toggle-archive-inline"
+            data-card-id="${card.id}"
+          >
+            ${actionLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -260,13 +481,40 @@ function renderCard(card) {
 
 const formatDateTime = (iso) => {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString('ru', {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleString('ru', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
   });
+};
+
+const formatDateTimeShort = (iso) => {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleDateString('ru', {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const formatTimeOnly = (iso) => {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
 };
 
 const formatValue = (value) => {
@@ -319,6 +567,34 @@ const openTelegramLink = (url) => {
   window.location.href = url;
 };
 
+const copyToClipboard = async (value) => {
+  const text = value == null ? '' : String(value);
+  if (!text.trim()) {
+    return false;
+  }
+  try {
+    if (typeof navigator === 'undefined' || typeof navigator.clipboard?.writeText !== 'function') {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      textarea.style.pointerEvents = 'none';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      return copied;
+    }
+
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    console.error('Copy error', error);
+    return false;
+  }
+};
+
 const showConfirmDialog = ({ title, body, confirmLabel, cancelLabel, confirmTone = 'primary' }) =>
   new Promise((resolve) => {
     if (!confirmOverlay || !confirmTitle || !confirmBody || !confirmConfirm || !confirmCancel) {
@@ -330,8 +606,12 @@ const showConfirmDialog = ({ title, body, confirmLabel, cancelLabel, confirmTone
     confirmBody.textContent = body;
     confirmConfirm.textContent = confirmLabel || 'Подтвердить';
     confirmCancel.textContent = cancelLabel || 'Отмена';
-    confirmConfirm.classList.remove('primary-button', 'danger-button');
-    confirmConfirm.classList.add(confirmTone === 'danger' ? 'danger-button' : 'primary-button');
+    confirmCancel.className =
+      'button button--outline button--sm';
+    confirmConfirm.className =
+      `button button--sm ${confirmTone === 'danger'
+        ? 'button--destructive'
+        : 'button--default'}`;
 
     confirmOverlay.classList.remove('is-hidden');
     confirmOverlay.setAttribute('aria-hidden', 'false');
@@ -496,20 +776,51 @@ const renderCardDetail = (card) => {
   const statusText = `${statusEmoji[card.status] ?? ''} ${statusName[card.status] ?? card.status}`.trim();
   const nextReview = formatDateTime(card.nextReviewAt);
   const isArchived = card.status === 'archived';
+  const statusClass = statusChipClass[card.status] || 'status-chip--learning';
   const actionLabel = isArchived ? 'Разархивировать' : 'Архивировать';
-  const actionTone = isArchived ? 'secondary-button' : 'danger-button';
+  const actionTone = isArchived
+    ? 'button button--outline'
+    : 'button button--destructive';
+  const canSendReminder = !isArchived && card.status !== 'pending';
+  const hasMessageLink = Boolean(getMessageLink(card));
+  const reminderButtonTone = canSendReminder
+    ? 'button button--default'
+    : 'button button--outline button--ghost';
 
   cardDetailContent.innerHTML = `
     <div class="card-detail__header">
-      <span class="status-pill">${escapeHtml(statusText)}</span>
+      <span class="status-chip ${statusClass}">${escapeHtml(statusText)}</span>
       <span class="card-detail__next">След. повтор: ${escapeHtml(nextReview)}</span>
     </div>
     <div class="card-detail__preview">
       ${renderPreview(card)}
     </div>
     <div class="detail-actions">
-      <button class="primary-button" type="button" data-action="open-message">
+      <button
+        class="${reminderButtonTone}"
+        type="button"
+        data-action="send-reminder-now"
+        ${canSendReminder ? '' : 'disabled'}
+      >
+      ${canSendReminder ? '🔔 Напомнить сейчас' : '🔕 Напоминание недоступно'}
+      </button>
+      <button class="${hasMessageLink
+        ? 'button button--default'
+        : 'button button--outline button--ghost'}" type="button" data-action="open-message" ${
+        hasMessageLink ? '' : 'disabled'
+      }>
         Перейти к карточке
+      </button>
+      ${hasMessageLink ? '' : '<p class="detail-note">Сейчас ссылка на сообщение недоступна. Доступность проверим в следующей версии.</p>'}
+      <button
+        class="${hasMessageLink
+          ? 'button button--outline'
+          : 'button button--outline button--ghost'}"
+        type="button"
+        data-action="copy-message-link"
+        ${hasMessageLink ? '' : 'disabled'}
+      >
+        Скопировать ссылку
       </button>
       <button class="${actionTone}" type="button" data-action="toggle-archive">
         ${actionLabel}
@@ -526,47 +837,103 @@ const renderCardDetail = (card) => {
   `;
 };
 
-// Archive card via API
-async function archiveCard(cardId) {
-  try {
-    const card = cardsData.find((item) => item.id === cardId);
-    const isArchived = card ? card.status === 'archived' : false;
-    const updated = await requestArchiveChange(cardId, isArchived);
-    if (updated) {
-      loadCards();
-    } else {
-      loadCards(); // reset swipe state if canceled
-    }
-  } catch (error) {
-    console.error('Failed to archive card', error);
-    tg.showAlert('Не удалось архивировать карточку');
-    loadCards(); // Reload to reset UI
-  }
-}
+const toggleArchiveCard = async (cardId, actionButton = null) => {
+  const card = cardsData.find((item) => item.id === cardId);
+  const isArchived = card ? card.status === 'archived' : false;
 
-// Restore card from archive via API
-async function restoreCard(cardId) {
-  try {
-    const card = cardsData.find((item) => item.id === cardId);
-    const isArchived = card ? card.status === 'archived' : true;
-    const updated = await requestArchiveChange(cardId, isArchived);
-    if (updated) {
-      loadCards();
-    } else {
-      loadCards();
-    }
-  } catch (error) {
-    console.error('Failed to restore card', error);
-    tg.showAlert('Не удалось вернуть карточку');
-    loadCards(); // Reload to reset UI
+  return runButtonAction(
+    { cardId, action: 'toggle-archive', button: actionButton, pendingText: 'Обновляю…' },
+    async () => {
+      try {
+        const updated = await requestArchiveChange(cardId, isArchived);
+        if (!updated) {
+          return false;
+        }
+        await loadCards();
+        return true;
+      } catch (error) {
+        await loadCards();
+        throw error;
+      }
+    },
+  );
+};
+
+const sendReminderNow = async (cardId, actionButton = null) => {
+  const card = cardsData.find((item) => item.id === cardId);
+  if (!card) {
+    tg.showAlert('Карточка не найдена.');
+    return false;
   }
-}
+
+  if (card.status === 'pending') {
+    tg.showAlert('Сначала активируйте карточку в боте или через оценку.');
+    return false;
+  }
+
+  if (card.status === 'archived') {
+    tg.showAlert('Верните карточку из архива перед отправкой напоминания.');
+    return false;
+  }
+
+  return runButtonAction(
+    {
+      cardId,
+      action: 'send-reminder',
+      button: actionButton,
+      pendingText: 'Отправляю...',
+    },
+    async () => {
+      const confirmed = await showConfirmDialog({
+        title: 'Отправить напоминание сейчас?',
+        body: 'Кликните «Отправить», и я сразу перешлю напоминание в ваш Telegram.',
+        confirmLabel: 'Отправить',
+        cancelLabel: 'Отмена',
+        confirmTone: 'primary',
+      });
+      if (!confirmed) {
+        return false;
+      }
+
+      try {
+        await apiCall(`/api/miniapp/cards/${cardId}/send-reminder`, {
+          method: 'POST',
+        });
+
+        if (typeof tg.HapticFeedback?.notificationOccurred === 'function') {
+          tg.HapticFeedback.notificationOccurred('success');
+        }
+
+        tg.showAlert('Напоминание отправлено');
+        await loadCards();
+        if (currentView === 'card-detail' && currentCardId === cardId) {
+          refreshCardDetail();
+        }
+        return true;
+      } catch (error) {
+        console.error('Failed to send reminder now', error);
+        const parsedMessage = getErrorMessage(error);
+        const parsedStatus = parseApiError(error).status;
+        if (parsedStatus === 409) {
+          tg.showAlert('Карточка ещё не активирована. Оцените хотя бы одну карточку, чтобы начать.');
+          return false;
+        }
+        if (parsedStatus === 404) {
+          tg.showAlert('Карточка не найдена или была удалена.');
+          return false;
+        }
+        tg.showAlert(`Не удалось отправить напоминание: ${parsedMessage}`);
+        return false;
+      }
+    },
+  );
+};
 
 // Attach swipe listeners using CardSwipe module
 function attachSwipeListeners() {
   const cardsList = document.getElementById('cardsList');
   if (window.CardSwipe) {
-    window.CardSwipe.attachSwipeListeners(cardsList, archiveCard, restoreCard);
+    window.CardSwipe.attachSwipeListeners(cardsList, toggleArchiveCard, toggleArchiveCard);
   }
 }
 
@@ -606,6 +973,9 @@ function groupCardsByDate(cards) {
   const byDate = {};
   cards.forEach(card => {
     if (!card.nextReviewAt) return;
+    if (Number.isNaN(new Date(card.nextReviewAt).getTime())) {
+      return;
+    }
     const key = toDateKey(card.nextReviewAt);
     if (!byDate[key]) byDate[key] = [];
     byDate[key].push(card);
@@ -678,11 +1048,11 @@ function renderDayCards(dateKey, byDate) {
         <span>${formatted}</span>
         <span class="calendar-day__count">${cards.length}</span>
       </div>
-      <div class="calendar-day__cards">
-        ${cards
-          .sort((a, b) => new Date(a.nextReviewAt) - new Date(b.nextReviewAt))
-          .map(card => {
-            const time = new Date(card.nextReviewAt).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+        <div class="calendar-day__cards">
+          ${cards
+            .sort((a, b) => new Date(a.nextReviewAt) - new Date(b.nextReviewAt))
+            .map(card => {
+            const time = formatTimeOnly(card.nextReviewAt);
             return `<div class="calendar-card" data-card-id="${card.id}">
               <span class="calendar-card__time">${time}</span>
               <span class="calendar-card__text">${escapeHtml(card.contentPreview || 'Без текста')}</span>
@@ -753,6 +1123,7 @@ async function loadCalendar() {
         <div class="empty">
           <div class="empty__icon">📅</div>
           <div class="empty__text">Нет запланированных повторений</div>
+          <div class="empty__subtext">Ровно в тот момент, когда нужно повторить, тут появятся дни с карточками.</div>
         </div>
       `;
       return;
@@ -762,10 +1133,12 @@ async function loadCalendar() {
     renderCalendar();
   } catch (error) {
     console.error('Error loading calendar:', error);
+    const safeMessage = getErrorMessage(error);
     calendarContent.innerHTML = `
       <div class="empty">
         <div class="empty__icon">⚠️</div>
-        <div class="empty__text">Ошибка загрузки календаря</div>
+        <div class="empty__text">Не удалось загрузить календарь</div>
+        <div class="empty__subtext">${escapeHtml(safeMessage)}</div>
       </div>
     `;
   }
@@ -779,11 +1152,17 @@ async function loadStats() {
   try {
     const result = await apiCall('/api/miniapp/stats');
     const stats = result.data;
-    
     statsContent.innerHTML = `
       <div class="stat-card">
-        <div class="stat-card__title">Всего карточек</div>
+        <div class="stat-card__title">Общая картина</div>
         <div class="stat-card__value">${stats.total}</div>
+        <div class="stat-card__subtitle">всех карточек в аккаунте</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-card__title">Готовы к повторению</div>
+        <div class="stat-card__value">${stats.dueToday}</div>
+        <div class="stat-card__subtitle">сегодня</div>
       </div>
       
       <div class="stat-grid">
@@ -804,19 +1183,15 @@ async function loadStats() {
           <div class="stat-card__value">${stats.archived}</div>
         </div>
       </div>
-      
-      <div class="stat-card">
-        <div class="stat-card__title">Готовы к повторению</div>
-        <div class="stat-card__value">${stats.dueToday}</div>
-        <div class="stat-card__subtitle">сегодня</div>
-      </div>
     `;
   } catch (error) {
     console.error('Error loading stats:', error);
+    const safeMessage = getErrorMessage(error);
     statsContent.innerHTML = `
       <div class="empty">
         <div class="empty__icon">⚠️</div>
-        <div class="empty__text">Ошибка загрузки статистики</div>
+        <div class="empty__text">Не удалось загрузить статистику</div>
+        <div class="empty__subtext">${escapeHtml(safeMessage)}</div>
       </div>
     `;
   }
@@ -836,13 +1211,21 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
-const cardsListElement = document.getElementById('cardsList');
 cardsListElement.addEventListener('click', (event) => {
-  const restoreButton = event.target.closest('[data-action="restore"]');
-  if (restoreButton) {
+  const inlineSendReminderButton = event.target.closest('[data-action="send-reminder-inline"]');
+  if (inlineSendReminderButton) {
     event.preventDefault();
     event.stopPropagation();
-    restoreCard(restoreButton.dataset.cardId);
+    const cardId = inlineSendReminderButton.dataset.cardId;
+    void sendReminderNow(cardId, inlineSendReminderButton);
+    return;
+  }
+
+  const inlineArchiveButton = event.target.closest('[data-action="toggle-archive-inline"]');
+  if (inlineArchiveButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    void toggleArchiveCard(inlineArchiveButton.dataset.cardId, inlineArchiveButton);
     return;
   }
 
@@ -850,6 +1233,21 @@ cardsListElement.addEventListener('click', (event) => {
   if (!cardElement || !cardElement.dataset.cardId) {
     return;
   }
+  openCardDetail(cardElement.dataset.cardId);
+});
+
+cardsListElement.addEventListener('keydown', (event) => {
+  if (!['Enter', ' '].includes(event.key)) {
+    return;
+  }
+  const actionButton = event.target.closest('[data-action]');
+  if (actionButton) return;
+
+  const cardElement = event.target.closest('.card');
+  if (!cardElement || !cardElement.dataset.cardId) {
+    return;
+  }
+  event.preventDefault();
   openCardDetail(cardElement.dataset.cardId);
 });
 
@@ -867,6 +1265,10 @@ if (cardDetailContent) {
     if (!card) return;
 
     if (actionButton.dataset.action === 'open-message') {
+      if (actionButton.disabled) {
+        tg.showAlert('Ссылка на исходное сообщение пока недоступна');
+        return;
+      }
       const link = getMessageLink(card);
       if (!link) {
         tg.showAlert('Не удалось сформировать ссылку на сообщение.');
@@ -878,7 +1280,7 @@ if (cardDetailContent) {
 
     if (actionButton.dataset.action === 'toggle-archive') {
       try {
-        const updated = await requestArchiveChange(card.id, card.status === 'archived');
+        const updated = await toggleArchiveCard(card.id, actionButton);
         if (updated) {
           refreshCardDetail();
         }
@@ -886,6 +1288,33 @@ if (cardDetailContent) {
         console.error('Failed to update card status', error);
         tg.showAlert('Не удалось обновить карточку');
       }
+    }
+
+    if (actionButton.dataset.action === 'send-reminder-now') {
+      await sendReminderNow(card.id, actionButton);
+    }
+
+    if (actionButton.dataset.action === 'copy-message-link') {
+      const link = getMessageLink(card);
+      if (!link) {
+        tg.showAlert('Ссылка пока недоступна');
+        return;
+      }
+
+      await runButtonAction(
+        { cardId: card.id, action: 'copy-link', button: actionButton, pendingText: 'Копирую…' },
+        async () => {
+          const copied = await copyToClipboard(link);
+          if (copied) {
+            if (typeof tg.HapticFeedback?.notificationOccurred === 'function') {
+              tg.HapticFeedback.notificationOccurred('success');
+            }
+            tg.showAlert('Ссылка скопирована');
+            return;
+          }
+          tg.showAlert('Не удалось скопировать ссылку');
+        }
+      );
     }
   });
 }
@@ -912,9 +1341,51 @@ document.addEventListener(
   true,
 );
 
-document.getElementById('statusFilter').addEventListener('change', (e) => {
+statusFilterElement?.addEventListener('change', (e) => {
   currentFilter = e.target.value;
+  currentSearchQuery = '';
+  if (cardsSearchInputElement) {
+    cardsSearchInputElement.value = '';
+  }
   loadCards();
+});
+
+cardsSearchInputElement?.addEventListener('input', (e) => {
+  currentSearchQuery = e.target.value || '';
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+  }
+  searchDebounceTimer = setTimeout(() => {
+    searchDebounceTimer = null;
+    renderVisibleCards();
+  }, 220);
+});
+
+cardsRefreshButton?.addEventListener('click', (event) => {
+  const button = event.target instanceof HTMLButtonElement ? event.target : null;
+  void runButtonAction(
+    { cardId: 'global', action: 'refresh-cards', button, pendingText: 'Обновляю…' },
+    () => loadCards(),
+  );
+});
+
+cardsClearFiltersButton?.addEventListener('click', () => {
+  currentFilter = '';
+  currentSearchQuery = '';
+  currentSortMode = 'nextReviewAsc';
+  if (statusFilterElement) statusFilterElement.value = '';
+  if (cardsSearchInputElement) cardsSearchInputElement.value = '';
+  if (cardsSortElement) cardsSortElement.value = 'nextReviewAsc';
+  loadCards();
+});
+
+cardsSortElement?.addEventListener('change', (e) => {
+  currentSortMode = e.target.value;
+  renderVisibleCards();
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  updateCardsHint(0, false);
 });
 
 // Helper function to animate calendar month transition

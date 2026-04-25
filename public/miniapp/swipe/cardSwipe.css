@@ -1,30 +1,27 @@
-/* Card Swipe-to-Archive Styles */
-
-/* Swipe Container */
 .card-swipe-container {
   position: relative;
   overflow: hidden;
-  border-radius: 16px;
-  margin-bottom: 0;
+  border-radius: var(--radius);
 }
 
 .card-swipe-background {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  background: linear-gradient(to left, #ef4444, #dc2626);
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding-right: 24px;
+  padding-right: 18px;
+  background: color-mix(in srgb, var(--primary) 10%, var(--background));
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity 160ms ease;
 }
 
 .card-swipe-background__content {
-  color: white;
-  font-weight: 600;
-  font-size: 16px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.card-swipe-container.is-swiping .card-swipe-background {
+  opacity: 1;
 }

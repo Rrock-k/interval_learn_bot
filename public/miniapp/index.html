@@ -11,46 +11,112 @@
 </head>
 
 <body>
-  <div id="app">
-    <header class="header">
-      <h1 class="header__title">Мои карточки</h1>
-      <div class="header__tabs">
-        <button class="tab tab--active" data-view="cards">📚 Карточки</button>
-        <button class="tab" data-view="calendar">📅 Календарь</button>
-        <button class="tab" data-view="stats">📊 Статистика</button>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="topbar__content">
+        <p class="topbar__kicker">Интервальное повторение</p>
+        <h1 class="topbar__title">Мои карточки</h1>
+        <p class="topbar__subtitle">Повторения, календарь и прогресс в одном месте.</p>
       </div>
     </header>
 
+    <nav class="tabs view-tabs" role="tablist" aria-label="Разделы миниаппа">
+      <button
+        class="tab tab--active"
+        id="tab-cards"
+        role="tab"
+        aria-selected="true"
+        aria-controls="view-cards"
+        data-view="cards"
+      >
+        Карточки
+      </button>
+      <button
+        class="tab"
+        id="tab-calendar"
+        role="tab"
+        aria-selected="false"
+        aria-controls="view-calendar"
+        data-view="calendar"
+      >
+        Календарь
+      </button>
+      <button
+        class="tab"
+        id="tab-stats"
+        role="tab"
+        aria-selected="false"
+        aria-controls="view-stats"
+        data-view="stats"
+      >
+        Статистика
+      </button>
+    </nav>
+
     <main class="main">
       <!-- Cards View -->
-      <div class="view view--active" data-view="cards">
-        <div class="filters">
-          <select id="statusFilter" class="filter-select">
-            <option value="">Все статусы</option>
-            <option value="pending">⏳ Ожидают</option>
-            <option value="learning">📖 Изучаются</option>
-            <option value="awaiting_grade">⏱️ Ждут оценки</option>
-            <option value="archived">📦 Архив</option>
-          </select>
-        </div>
+      <div class="view view--active" data-view="cards" id="view-cards" role="tabpanel" aria-labelledby="tab-cards">
+        <section class="toolbar">
+          <div class="toolbar__row">
+            <select
+              id="statusFilter"
+              class="toolbar-control toolbar__field toolbar__field--grow select filter-select"
+              aria-label="Фильтр по статусу"
+            >
+              <option value="">Все статусы</option>
+              <option value="pending">Ожидают</option>
+              <option value="learning">Изучаются</option>
+              <option value="awaiting_grade">Ждут оценки</option>
+              <option value="archived">Архив</option>
+            </select>
+            <select
+              id="cardsSort"
+              class="toolbar-control toolbar__field toolbar__field--grow select filter-select"
+              aria-label="Сортировка"
+            >
+              <option value="nextReviewAsc">Ближайший повтор</option>
+              <option value="nextReviewDesc">Самый поздний повтор</option>
+              <option value="updatedDesc">Новые сначала</option>
+              <option value="repetitionDesc">Больше повторов</option>
+            </select>
+          </div>
+          <div class="toolbar__quick-actions">
+            <button class="button button--outline button--sm" id="cardsRefreshBtn" type="button">Обновить</button>
+            <button class="button button--outline button--sm" id="cardsClearFiltersBtn" type="button">Сбросить фильтры</button>
+          </div>
+          <input
+            id="cardsSearch"
+            class="toolbar-control toolbar-input input"
+            type="search"
+            aria-label="Поиск по тексту"
+            placeholder="Введите текст карточки..."
+          />
+          <p id="cardsSummary" class="toolbar__summary" aria-live="polite"></p>
+        </section>
 
-        <div id="cardsList" class="cards-list">
-          <div class="loading">Загрузка...</div>
-        </div>
+        <section class="toolbar__helper" id="cardsHint" aria-live="polite">
+          <div class="toolbar__helper-chip">Откройте карточку для деталей или используйте быстрые действия в списке.</div>
+        </section>
+
+        <section class="cards-list-wrap">
+          <div id="cardsList" class="cards-list">
+            <div class="loading">Загрузка...</div>
+          </div>
+        </section>
       </div>
 
       <!-- Card Detail View -->
-      <div class="view" data-view="card-detail">
+      <div class="view" data-view="card-detail" id="view-card-detail" role="tabpanel">
         <div class="card-detail">
           <div class="card-detail__nav">
-            <button class="back-button" id="cardBackBtn" type="button">← Назад</button>
+            <button class="button button--outline" id="cardBackBtn" type="button">На список</button>
           </div>
           <div id="cardDetailContent"></div>
         </div>
       </div>
 
       <!-- Calendar View -->
-      <div class="view" data-view="calendar">
+      <div class="view" data-view="calendar" id="view-calendar" role="tabpanel" aria-labelledby="tab-calendar">
         <div class="calendar">
           <div id="calendarContent" class="calendar__content">
             <div class="loading">Загрузка календаря...</div>
@@ -59,7 +125,7 @@
       </div>
 
       <!-- Stats View -->
-      <div class="view" data-view="stats">
+      <div class="view" data-view="stats" id="view-stats" role="tabpanel" aria-labelledby="tab-stats">
         <div id="statsContent" class="stats">
           <div class="loading">Загрузка статистики...</div>
         </div>
@@ -72,8 +138,8 @@
       <h2 class="confirm-title" id="confirmTitle"></h2>
       <p class="confirm-body" id="confirmBody"></p>
       <div class="confirm-actions">
-        <button class="secondary-button" id="confirmCancel" type="button">Отмена</button>
-        <button class="primary-button" id="confirmConfirm" type="button">Подтвердить</button>
+        <button class="button button--outline" id="confirmCancel" type="button">Отмена</button>
+        <button class="button button--default" id="confirmConfirm" type="button">Подтвердить</button>
       </div>
     </div>
   </div>

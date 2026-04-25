@@ -334,6 +334,42 @@ export const createHttpServer = (
     }
   });
 
+  app.post('/api/miniapp/cards/:id/send-reminder', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const cardId = req.params.id;
+
+    if (!cardId) {
+      res.status(400).json({ error: 'Card ID required' });
+      return;
+    }
+
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.userId !== userId) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
+
+      await scheduler.triggerImmediate(cardId);
+      res.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось отправить напоминание';
+      logger.error('Error sending immediate reminder for Mini App', error);
+
+      if (message.includes('Карточка ещё не активирована')) {
+        res.status(409).json({ error: message });
+        return;
+      }
+
+      if (message.includes('not found')) {
+        res.status(404).json({ error: message });
+        return;
+      }
+
+      res.status(500).json({ error: message });
+    }
+  });
+
   // Serve static files (including Mini App assets) - must be before auth middleware
   app.use(express.static(publicDir));
 
