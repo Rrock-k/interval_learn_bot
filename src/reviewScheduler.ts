@@ -401,10 +401,11 @@ export class ReviewScheduler {
       if (typeof candidate === 'string') {
         return candidate;
       }
-      if (candidate && typeof candidate === 'object') {
+        if (candidate && typeof candidate === 'object') {
         const asObject = candidate as {
           description?: unknown;
           message?: unknown;
+          response?: unknown;
         };
         if (typeof asObject.description === 'string') {
           return asObject.description;

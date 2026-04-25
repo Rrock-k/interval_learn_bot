@@ -374,6 +374,15 @@ export const createBot = (store: CardStore) => {
 
   const handleMediaGroup = async (entry: MediaGroupBuffer) => {
     try {
+      const representative = selectMediaGroupMessage(entry.messages);
+      if (!representative) {
+        await bot.telegram.sendMessage(
+          entry.chatId,
+          '😔 Пока поддерживаются только текст, фото и видео. Код ошибки: E_UNSUPPORTED_CONTENT',
+        );
+        return;
+      }
+
       const parsed = parseMediaGroup(entry.messages);
       if (!parsed) {
         await bot.telegram.sendMessage(
@@ -382,7 +391,7 @@ export const createBot = (store: CardStore) => {
         );
         return;
       }
-      const representative = selectMediaGroupMessage(entry.messages);
+
       const messageIds = extractMediaGroupMessageIds(entry.messages);
       await createPendingCardAndPrompt({
         store,
