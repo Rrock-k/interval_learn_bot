@@ -55,39 +55,49 @@ const applyTheme = () => {
   const isDark = isDarkColor(resolvedBg);
   const themeTokens = isDark
     ? {
-        '--surface': '#0b1120',
-        '--secondary': '#111827',
-        '--muted': '#1f2937',
-        '--accent': '#172554',
-        '--accent-foreground': '#bfdbfe',
-        '--border': '#334155',
-        '--ring': '#60a5fa',
-        '--text-soft': resolvedHint || '#cbd5e1',
-        '--text-subtle': '#94a3b8',
-        '--destructive': '#ef4444',
-        '--shadow-soft': 'none',
+        '--background': '#1a1b1d',
+        '--foreground': '#f4f4f1',
+        '--card': '#202124',
+        '--popover': '#202124',
+        '--primary': '#f2f2ee',
+        '--primary-foreground': '#191a1c',
+        '--surface': '#17181a',
+        '--secondary': '#242528',
+        '--muted': '#2a2b2f',
+        '--accent': '#303136',
+        '--accent-foreground': '#f1f1ed',
+        '--border': 'rgba(242, 242, 238, 0.18)',
+        '--ring': 'rgba(242, 242, 238, 0.42)',
+        '--text-soft': '#aaa9a4',
+        '--text-subtle': '#7f7f7a',
+        '--destructive': '#d7d2ca',
+        '--destructive-foreground': '#17181a',
+        '--shadow-soft': '0 28px 80px rgba(0, 0, 0, 0.32)',
       }
     : {
-        '--surface': '#f8fafc',
-        '--secondary': '#f8fafc',
-        '--muted': '#f3f4f6',
-        '--accent': '#eef2ff',
-        '--accent-foreground': '#1d4ed8',
-        '--border': '#e5e7eb',
-        '--ring': '#93c5fd',
-        '--text-soft': resolvedHint || '#6b7280',
-        '--text-subtle': '#9ca3af',
-        '--destructive': '#dc2626',
-        '--shadow-soft': '0 8px 24px rgba(15, 23, 42, 0.06)',
+        '--background': '#f3f3ef',
+        '--foreground': '#1e1f20',
+        '--card': '#fbfbf8',
+        '--popover': '#fbfbf8',
+        '--primary': '#202124',
+        '--primary-foreground': '#f8f8f4',
+        '--surface': '#edede8',
+        '--secondary': '#e6e6df',
+        '--muted': '#deded6',
+        '--accent': '#d8d8cf',
+        '--accent-foreground': '#222322',
+        '--border': 'rgba(31, 31, 28, 0.14)',
+        '--ring': 'rgba(31, 31, 28, 0.34)',
+        '--text-soft': '#676762',
+        '--text-subtle': '#96958e',
+        '--destructive': '#5f5b54',
+        '--destructive-foreground': '#fbfbf8',
+        '--shadow-soft': '0 24px 70px rgba(42, 42, 36, 0.12)',
       };
 
-  document.documentElement.style.setProperty('--background', resolvedBg);
-  document.documentElement.style.setProperty('--foreground', resolvedText);
   document.documentElement.style.setProperty('--muted-foreground', resolvedHint);
-  document.documentElement.style.setProperty('--card', resolvedBg);
-  document.documentElement.style.setProperty('--popover', resolvedBg);
-  document.documentElement.style.setProperty('--card-foreground', resolvedText);
-  document.documentElement.style.setProperty('--popover-foreground', resolvedText);
+  document.documentElement.style.setProperty('--card-foreground', themeTokens['--foreground']);
+  document.documentElement.style.setProperty('--popover-foreground', themeTokens['--foreground']);
   Object.entries(themeTokens).forEach(([name, value]) => {
     document.documentElement.style.setProperty(name, value);
   });
@@ -200,10 +210,10 @@ const confirmCancel = document.getElementById('confirmCancel');
 const confirmConfirm = document.getElementById('confirmConfirm');
 
 const statusEmoji = {
-  pending: '⏳',
-  learning: '📖',
-  awaiting_grade: '⏱️',
-  archived: '📦',
+  pending: '○',
+  learning: '◐',
+  awaiting_grade: '◷',
+  archived: '□',
 };
 
 const statusName = {
@@ -552,11 +562,11 @@ async function loadCards() {
 function renderCard(card) {
   const nextReview = formatDateTimeShort(card.nextReviewAt);
   const isArchived = card.status === 'archived';
-  const swipeLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
+  const swipeLabel = isArchived ? 'Вернуть' : 'Архив';
   const repetitionValue = Number.isFinite(card.repetition) ? card.repetition : 0;
   const status = statusChipClass[card.status] || 'status-chip--pending';
   const hasDate = Boolean(card.nextReviewAt);
-  const actionLabel = isArchived ? '↩️ Вернуть' : '📦 Архив';
+  const actionLabel = isArchived ? 'Вернуть' : 'Архив';
   const canSendReminder = card.status === 'learning' || card.status === 'awaiting_grade';
   const statusLabel = statusName[card.status] || 'Неизвестный статус';
   const statusIcon = statusEmoji[card.status] || '📄';
@@ -576,7 +586,7 @@ function renderCard(card) {
         </div>
         <div class="card__content">${escapeHtml(contentText)}</div>
         <div class="card__meta">
-          <span class="card__meta-item">🔁 ${repetitionValue}</span>
+          <span class="card__meta-item">Повторы: ${repetitionValue}</span>
         </div>
         <div class="card__actions">
           ${
@@ -587,7 +597,7 @@ function renderCard(card) {
             data-action="send-reminder-inline"
             data-card-id="${card.id}"
           >
-            🔔 Напомнить сейчас
+            Напомнить сейчас
           </button>`
               : ''
           }
@@ -626,7 +636,7 @@ const formatDateTimeShort = (iso) => {
   if (Number.isNaN(date.getTime())) {
     return '—';
   }
-  return date.toLocaleDateString('ru', {
+  return date.toLocaleString('ru', {
     day: 'numeric',
     month: 'short',
     hour: '2-digit',
@@ -940,7 +950,7 @@ const renderCardDetail = (card) => {
         data-action="send-reminder-now"
         ${canSendReminder ? '' : 'disabled'}
       >
-      ${canSendReminder ? '🔔 Напомнить сейчас' : '🔕 Напоминание недоступно'}
+      ${canSendReminder ? 'Напомнить сейчас' : 'Напоминание недоступно'}
       </button>
       ${hasMessageLink ? '' : '<p class="detail-note">Сейчас ссылка на сообщение недоступна. Доступность проверим в следующей версии.</p>'}
       <button
@@ -987,7 +997,7 @@ const renderNotificationDetail = (card) => {
 
   notificationDetailContent.innerHTML = `
     <div class="card-detail__header">
-      <span class="status-chip status-chip--learning">🔔 Уведомление</span>
+      <span class="status-chip status-chip--learning">Уведомление</span>
       <span class="card-detail__next">Сработало для карточки</span>
     </div>
     <div class="card-detail__id-row">
@@ -1394,19 +1404,19 @@ async function loadStats() {
       
       <div class="stat-grid">
         <div class="stat-card">
-          <div class="stat-card__title">⏳ Ожидают</div>
+          <div class="stat-card__title">Ожидают</div>
           <div class="stat-card__value">${stats.pending}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-card__title">📖 Изучаются</div>
+          <div class="stat-card__title">Изучаются</div>
           <div class="stat-card__value">${stats.learning}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-card__title">⏱️ Ждут оценки</div>
+          <div class="stat-card__title">Ждут оценки</div>
           <div class="stat-card__value">${stats.awaitingGrade}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-card__title">📦 Архив</div>
+          <div class="stat-card__title">Архив</div>
           <div class="stat-card__value">${stats.archived}</div>
         </div>
       </div>

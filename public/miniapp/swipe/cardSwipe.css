@@ -1,7 +1,7 @@
 .card-swipe-container {
   position: relative;
   overflow: hidden;
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
 }
 
 .card-swipe-background {
@@ -10,8 +10,10 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding-right: 18px;
-  background: color-mix(in srgb, var(--primary) 10%, var(--background));
+  padding-right: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--foreground) 10%, var(--background));
   opacity: 0;
   pointer-events: none;
   transition: opacity 160ms ease;
@@ -20,7 +22,9 @@
 .card-swipe-background__content {
   color: var(--foreground);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 820;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .card-swipe-container.is-swiping .card-swipe-background {
