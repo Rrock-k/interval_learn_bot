@@ -134,8 +134,25 @@ export class ReviewScheduler {
             allow_sending_without_reply: false,
           },
         });
-        if (!reminder.reply_to_message) {
-          throw new Error('replied message not found');
+        const replyToMessage = reminder.reply_to_message as
+          | { message_id?: number; chat?: { id?: string | number } }
+          | undefined;
+        const replyToMessageId = replyToMessage?.message_id ?? null;
+        const replyToChatId =
+          typeof replyToMessage?.chat?.id === 'undefined'
+            ? null
+            : String(replyToMessage.chat.id);
+        logger.info(
+          `[ReviewScheduler sendReminderWithReply:result] card=${card.id} reason=${reason} messageId=${reminder.message_id} replyTo=${replyToChatId ?? 'null'}:${replyToMessageId ?? 'null'}`,
+        );
+        if (
+          !replyToMessage ||
+          replyToMessageId !== baseMessageId ||
+          replyToChatId !== String(targetChatId)
+        ) {
+          throw new Error(
+            `reply target mismatch: expected ${targetChatId}:${baseMessageId}, got ${replyToChatId ?? 'null'}:${replyToMessageId ?? 'null'}`,
+          );
         }
         return reminder.message_id;
       };
@@ -343,7 +360,7 @@ export class ReviewScheduler {
       return false;
     }
     const fullText = [description].join(' ');
-    return /reply message not found|message to reply not found|replied message not found|message is not found/i.test(
+    return /reply message not found|message to reply not found|replied message not found|message is not found|reply target mismatch/i.test(
       fullText,
     );
   }
