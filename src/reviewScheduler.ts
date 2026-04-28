@@ -125,14 +125,14 @@ export class ReviewScheduler {
 
       const sendReminderWithReply = async (baseMessageId: number) => {
         logger.info(
-          `[ReviewScheduler sendReminderWithReply] card=${card.id} reason=${reason} baseMessageId=${baseMessageId} target=${targetChatId}`,
+          `[ReviewScheduler sendReminderWithReply] card=${card.id} reason=${reason} mode=reply_to_message_id baseMessageId=${baseMessageId} target=${targetChatId}`,
         );
-        const reminder = await this.bot.telegram.sendMessage(targetChatId, reminderText, {
+        const reminder = await (this.bot.telegram as any).callApi('sendMessage', {
+          chat_id: targetChatId,
+          text: reminderText,
           reply_markup: keyboard.reply_markup,
-          reply_parameters: {
-            message_id: baseMessageId,
-            allow_sending_without_reply: false,
-          },
+          reply_to_message_id: baseMessageId,
+          allow_sending_without_reply: false,
         });
         const replyToMessage = reminder.reply_to_message as
           | { message_id?: number; chat?: { id?: string | number } }
