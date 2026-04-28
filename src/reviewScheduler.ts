@@ -83,6 +83,9 @@ export class ReviewScheduler {
 
   public async triggerImmediate(cardId: string) {
     let card = await withDbRetry(() => this.store.getCardById(cardId));
+    logger.info(
+      `[ReviewScheduler triggerImmediate] card=${card.id} status=${card.status} base=${card.baseChannelMessageId ?? 'null'} pending=${card.pendingChannelMessageId ?? 'null'} awaiting=${card.awaitingGradeSince ?? 'null'}`,
+    );
     if (card.status === 'pending') {
       throw new Error('Карточка ещё не активирована');
     }
@@ -97,6 +100,9 @@ export class ReviewScheduler {
   private async sendCardToChannel(card: CardRecord, reason: NotificationReason) {
     let targetChatId = card.userId;
     try {
+      logger.info(
+        `[ReviewScheduler sendCardToChannel:start] card=${card.id} reason=${reason} status=${card.status} base=${card.baseChannelMessageId ?? 'null'} pending=${card.pendingChannelMessageId ?? 'null'} source=${card.sourceChatId}:${card.sourceMessageId}`,
+      );
       if (card.pendingChannelId && card.pendingChannelMessageId) {
         await this.cleanupPendingMessage(card);
         await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
@@ -118,6 +124,9 @@ export class ReviewScheduler {
       };
 
       const sendReminderWithReply = async (baseMessageId: number) => {
+        logger.info(
+          `[ReviewScheduler sendReminderWithReply] card=${card.id} reason=${reason} baseMessageId=${baseMessageId} target=${targetChatId}`,
+        );
         const reminder = await this.bot.telegram.sendMessage(targetChatId, reminderText, {
           reply_markup: keyboard.reply_markup,
           reply_parameters: {
@@ -132,6 +141,9 @@ export class ReviewScheduler {
       };
 
       const sendStoredBaseMessage = async (withKeyboard = false) => {
+        logger.info(
+          `[ReviewScheduler sendStoredBaseMessage] card=${card.id} reason=${reason} withKeyboard=${withKeyboard} target=${targetChatId} contentType=${card.contentType}`,
+        );
         const preview =
           normalizePreview(card.contentPreview) ??
           (card.contentType === 'photo'
@@ -192,22 +204,34 @@ export class ReviewScheduler {
 
       if (!card.baseChannelMessageId) {
         try {
+          logger.info(
+            `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=no_base_send_full_card`,
+          );
           pendingMessageId = await sendStoredBaseMessage(true);
         } catch (error) {
           logger.warn(
             `Не удалось отправить полную карточку для карточки ${card.id}, попробую ещё раз из сохранённых данных`,
             error,
           );
+          logger.info(
+            `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=no_base_retry_full_card`,
+          );
           pendingMessageId = await sendStoredBaseMessage(true);
         }
       } else {
         try {
+          logger.info(
+            `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=reply baseMessageId=${card.baseChannelMessageId}`,
+          );
           pendingMessageId = await sendReminderWithReply(card.baseChannelMessageId);
           usedReply = true;
         } catch (err) {
           if (this.isMissingReplyTarget(err)) {
             logger.warn(
               `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
+            );
+            logger.info(
+              `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=missing_reply_target_recreate_full_card`,
             );
             await withDbRetry(() => this.store.setBaseChannelMessage(card.id, null));
             try {
@@ -216,6 +240,9 @@ export class ReviewScheduler {
               logger.warn(
                 `Не удалось восстановить полную карточку для карточки ${card.id}, пробую ещё раз из сохранённых данных`,
                 error,
+              );
+              logger.info(
+                `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=missing_reply_target_retry_full_card`,
               );
               pendingMessageId = await sendStoredBaseMessage(true);
             }

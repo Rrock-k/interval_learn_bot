@@ -378,7 +378,11 @@ export const createHttpServer = (
         return;
       }
 
+      logger.info(
+        `[MiniApp send-reminder] request card=${cardId} user=${userId} status=${card.status} base=${card.baseChannelMessageId ?? 'null'} pending=${card.pendingChannelMessageId ?? 'null'} awaiting=${card.awaitingGradeSince ?? 'null'}`,
+      );
       await scheduler.triggerImmediate(cardId);
+      logger.info(`[MiniApp send-reminder] completed card=${cardId} user=${userId}`);
       res.json({ ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Не удалось отправить напоминание';
@@ -475,7 +479,9 @@ export const createHttpServer = (
 
   app.post('/api/cards/:id/force-review', async (req, res) => {
     try {
+      logger.info(`[Dashboard force-review] request card=${req.params.id}`);
       await scheduler.triggerImmediate(req.params.id);
+      logger.info(`[Dashboard force-review] completed card=${req.params.id}`);
       res.json({ ok: true });
     } catch (error) {
       logger.error('Ошибка ускорения карточки', error);
