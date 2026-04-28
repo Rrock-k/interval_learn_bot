@@ -1,0 +1,4 @@
+interface:
+  display_name: "Railway CLI"
+  short_description: "Railway login, link, deploy, logs, and variables"
+  default_prompt: "Use this skill when the user asks how to authenticate with Railway, link a project, deploy with the CLI, inspect logs, or manage variables. Prefer browser login on a local machine and browserless login in SSH or CI."

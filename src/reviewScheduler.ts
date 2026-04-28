@@ -109,7 +109,7 @@ export class ReviewScheduler {
 
       const keyboard = buildReviewKeyboard(card.id);
       let pendingMessageId: number;
-      let wasCopied = false;
+      let usedReply = false;
       const reminderText = '🔔 Время повторить запись';
 
       const normalizePreview = (value?: string | null): string | null => {
@@ -117,42 +117,21 @@ export class ReviewScheduler {
         return normalized === '' ? null : normalized;
       };
 
-      const sendReminderDetached = async () => {
+      const sendReminderWithReply = async (baseMessageId: number) => {
         const reminder = await this.bot.telegram.sendMessage(targetChatId, reminderText, {
           reply_markup: keyboard.reply_markup,
+          reply_parameters: {
+            message_id: baseMessageId,
+            allow_sending_without_reply: false,
+          },
         });
+        if (!reminder.reply_to_message) {
+          throw new Error('replied message not found');
+        }
         return reminder.message_id;
       };
 
-      const sendReminderWithReply = async (
-        baseMessageId: number,
-        options: { fallbackToDetached?: boolean } = {},
-      ) => {
-        try {
-          const reminder = await this.bot.telegram.sendMessage(
-            targetChatId,
-            reminderText,
-            {
-              reply_markup: keyboard.reply_markup,
-              reply_parameters: {
-                message_id: baseMessageId,
-                allow_sending_without_reply: false,
-              },
-            },
-          );
-          if (!reminder.reply_to_message) {
-            throw new Error('replied message not found');
-          }
-          return reminder.message_id;
-        } catch (error) {
-          if (options.fallbackToDetached !== false && this.isMissingReplyTarget(error)) {
-            return sendReminderDetached();
-          }
-          throw error;
-        }
-      };
-
-      const sendStoredBaseMessage = async () => {
+      const sendStoredBaseMessage = async (withKeyboard = false) => {
         const preview =
           normalizePreview(card.contentPreview) ??
           (card.contentType === 'photo'
@@ -160,13 +139,14 @@ export class ReviewScheduler {
             : card.contentType === 'video'
               ? '[Видео]'
               : 'Карточка без текста');
+        const replyMarkup = withKeyboard ? { reply_markup: keyboard.reply_markup } : {};
         let messageId: number;
         if (card.contentType === 'photo' && card.contentFileId) {
           try {
             const baseMessage = await this.bot.telegram.sendPhoto(
               targetChatId,
               card.contentFileId,
-              { caption: preview.slice(0, 1024) },
+              { caption: preview.slice(0, 1024), ...replyMarkup },
             );
             messageId = baseMessage.message_id;
           } catch (error) {
@@ -174,6 +154,7 @@ export class ReviewScheduler {
             const baseMessage = await this.bot.telegram.sendMessage(
               targetChatId,
               preview,
+              replyMarkup,
             );
             messageId = baseMessage.message_id;
           }
@@ -182,7 +163,7 @@ export class ReviewScheduler {
             const baseMessage = await this.bot.telegram.sendVideo(
               targetChatId,
               card.contentFileId,
-              { caption: preview.slice(0, 1024) },
+              { caption: preview.slice(0, 1024), ...replyMarkup },
             );
             messageId = baseMessage.message_id;
           } catch (error) {
@@ -190,11 +171,16 @@ export class ReviewScheduler {
             const baseMessage = await this.bot.telegram.sendMessage(
               targetChatId,
               preview,
+              replyMarkup,
             );
             messageId = baseMessage.message_id;
           }
         } else {
-          const baseMessage = await this.bot.telegram.sendMessage(targetChatId, preview);
+          const baseMessage = await this.bot.telegram.sendMessage(
+            targetChatId,
+            preview,
+            replyMarkup,
+          );
           messageId = baseMessage.message_id;
         }
         card.baseChannelMessageId = messageId;
@@ -204,58 +190,20 @@ export class ReviewScheduler {
         return messageId;
       };
 
-      const copyOriginal = async () => {
-        const sourceIds = (card.sourceMessageIds || [])
-          .map((id) => Number(id))
-          .filter((id) => Number.isFinite(id));
-        const uniqueIds = Array.from(new Set(sourceIds)).sort((a, b) => a - b);
-        if (uniqueIds.length > 1) {
-          const copies = await this.bot.telegram.copyMessages(
-            targetChatId,
-            card.sourceChatId,
-            uniqueIds,
-          );
-          const lastCopiedId = copies[copies.length - 1]?.message_id;
-          if (!lastCopiedId) {
-            throw new Error(`Не удалось скопировать медиагруппу карточки ${card.id}`);
-          }
-          card.baseChannelMessageId = lastCopiedId;
-          await withDbRetry(() =>
-            this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
-          );
-          return card.baseChannelMessageId;
-        }
-        const response = await this.bot.telegram.copyMessage(
-          targetChatId,
-          card.sourceChatId,
-          card.sourceMessageId,
-        );
-        card.baseChannelMessageId = response.message_id;
-        await withDbRetry(() =>
-          this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
-        );
-        return response.message_id;
-      };
-
       if (!card.baseChannelMessageId) {
         try {
-          const baseMessageId = await copyOriginal();
-          wasCopied = true;
-          pendingMessageId = await sendReminderWithReply(baseMessageId);
+          pendingMessageId = await sendStoredBaseMessage(true);
         } catch (error) {
           logger.warn(
-            `Не удалось скопировать исходное сообщение для карточки ${card.id}, создаю базу из сохранённых данных`,
+            `Не удалось отправить полную карточку для карточки ${card.id}, попробую ещё раз из сохранённых данных`,
             error,
           );
-          const baseMessageId = await sendStoredBaseMessage();
-          wasCopied = false;
-          pendingMessageId = await sendReminderWithReply(baseMessageId);
+          pendingMessageId = await sendStoredBaseMessage(true);
         }
       } else {
         try {
-          pendingMessageId = await sendReminderWithReply(card.baseChannelMessageId, {
-            fallbackToDetached: false,
-          });
+          pendingMessageId = await sendReminderWithReply(card.baseChannelMessageId);
+          usedReply = true;
         } catch (err) {
           if (this.isMissingReplyTarget(err)) {
             logger.warn(
@@ -263,17 +211,13 @@ export class ReviewScheduler {
             );
             await withDbRetry(() => this.store.setBaseChannelMessage(card.id, null));
             try {
-              const baseMessageId = await copyOriginal();
-              wasCopied = true;
-              pendingMessageId = await sendReminderWithReply(baseMessageId);
+              pendingMessageId = await sendStoredBaseMessage(true);
             } catch (error) {
               logger.warn(
-                `Не удалось скопировать исходное сообщение после падения ответа для карточки ${card.id}, создаю базу из сохранённых данных`,
+                `Не удалось восстановить полную карточку для карточки ${card.id}, пробую ещё раз из сохранённых данных`,
                 error,
               );
-              const baseMessageId = await sendStoredBaseMessage();
-              wasCopied = false;
-              pendingMessageId = await sendReminderWithReply(baseMessageId);
+              pendingMessageId = await sendStoredBaseMessage(true);
             }
           } else {
             throw err;
@@ -298,7 +242,7 @@ export class ReviewScheduler {
         }),
       );
       logger.info(
-        `Отправлена карточка ${card.id} в канал (${reason})${wasCopied ? '' : ' (reply)'}`,
+        `Отправлена карточка ${card.id} в канал (${reason})${usedReply ? ' (reply)' : ''}`,
       );
     } catch (error) {
       logger.error(`Не удалось отправить карточку ${card.id}`, error);

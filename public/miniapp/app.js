@@ -120,6 +120,7 @@ const cardsSearchInputElement = document.getElementById('cardsSearch');
 const cardsSortElement = document.getElementById('cardsSort');
 const cardsRefreshButton = document.getElementById('cardsRefreshBtn');
 const cardsClearFiltersButton = document.getElementById('cardsClearFiltersBtn');
+const viewTabsElement = document.querySelector('.view-tabs');
 
 const getStartParamRaw = () => {
   const fromInitData = tg?.initDataUnsafe?.start_param;
@@ -168,6 +169,13 @@ const parseStartParam = () => {
     }
   }
 
+  if (decoded.startsWith('notification_')) {
+    const cardId = decoded.slice('notification_'.length);
+    if (cardId) {
+      return { type: 'notification', cardId };
+    }
+  }
+
   if (decoded.startsWith('view_')) {
     const view = decoded.slice('view_'.length);
     if (['cards', 'calendar', 'stats'].includes(view)) {
@@ -183,6 +191,8 @@ let deepLinkHandled = false;
 
 const cardDetailContent = document.getElementById('cardDetailContent');
 const cardBackBtn = document.getElementById('cardBackBtn');
+const notificationDetailContent = document.getElementById('notificationDetailContent');
+const notificationBackBtn = document.getElementById('notificationBackBtn');
 const confirmOverlay = document.getElementById('confirmOverlay');
 const confirmTitle = document.getElementById('confirmTitle');
 const confirmBody = document.getElementById('confirmBody');
@@ -215,6 +225,13 @@ const notificationReasonLabel = {
   manual_now: 'вручную',
   manual_override: 'дата вручную',
 };
+
+const copyIconSvg = `
+  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+  </svg>
+`;
 
 const renderCardsSummary = (cards) => {
   if (!cardsSummary) return;
@@ -389,9 +406,14 @@ const runButtonAction = async ({ cardId, action, button, pendingText }, callback
 // View switching
 function switchView(viewName) {
   currentView = viewName;
-  const activeTabView = viewName === 'card-detail' ? 'cards' : viewName;
-  if (viewName !== 'card-detail') {
+  const isDetailView = viewName === 'card-detail' || viewName === 'notification-detail';
+  const activeTabView = isDetailView ? 'cards' : viewName;
+  if (!isDetailView) {
     currentCardId = null;
+  }
+
+  if (viewTabsElement) {
+    viewTabsElement.classList.toggle('is-hidden', isDetailView);
   }
   
   // Update tabs
@@ -754,7 +776,7 @@ const updateCardStatus = async (cardId, status) => {
   );
 };
 
-const requestArchiveChange = async (cardId, isArchived) => {
+const confirmArchiveChange = async (isArchived) => {
   const confirm = await showConfirmDialog({
     title: isArchived ? 'Разархивировать карточку?' : 'Архивировать карточку?',
     body: isArchived
@@ -769,8 +791,6 @@ const requestArchiveChange = async (cardId, isArchived) => {
     return false;
   }
 
-  const status = isArchived ? 'learning' : 'archived';
-  await updateCardStatus(cardId, status);
   return true;
 };
 
@@ -854,7 +874,6 @@ const renderAdditionalDetails = (card) => {
     ['Последний повтор', formatDateTime(card.lastReviewedAt)],
     ['Создана', formatDateTime(card.createdAt)],
     ['Обновлена', formatDateTime(card.updatedAt)],
-    ['ID карточки', formatValue(card.id)],
     ['Чат', formatValue(card.sourceChatId)],
     ['Сообщение', formatValue(card.sourceMessageId)],
   ];
@@ -896,6 +915,21 @@ const renderCardDetail = (card) => {
       <span class="status-chip ${statusClass}">${escapeHtml(statusText)}</span>
       <span class="card-detail__next">След. повтор: ${escapeHtml(nextReview)}</span>
     </div>
+    <div class="card-detail__id-row">
+      <div class="card-detail__id-meta">
+        <span class="card-detail__id-label">ID карточки</span>
+        <span class="card-detail__id-value">${escapeHtml(card.id)}</span>
+      </div>
+      <button
+        class="button button--outline button--sm button--icon-only card-detail__id-copy"
+        type="button"
+        data-action="copy-card-id"
+        aria-label="Скопировать ID карточки"
+        title="Скопировать ID карточки"
+      >
+        ${copyIconSvg}
+      </button>
+    </div>
     <div class="card-detail__preview">
       ${renderPreview(card)}
     </div>
@@ -907,13 +941,6 @@ const renderCardDetail = (card) => {
         ${canSendReminder ? '' : 'disabled'}
       >
       ${canSendReminder ? '🔔 Напомнить сейчас' : '🔕 Напоминание недоступно'}
-      </button>
-      <button class="${hasMessageLink
-        ? 'button button--default'
-        : 'button button--outline button--ghost'}" type="button" data-action="open-message" ${
-        hasMessageLink ? '' : 'disabled'
-      }>
-        Перейти к карточке
       </button>
       ${hasMessageLink ? '' : '<p class="detail-note">Сейчас ссылка на сообщение недоступна. Доступность проверим в следующей версии.</p>'}
       <button
@@ -941,26 +968,119 @@ const renderCardDetail = (card) => {
   `;
 };
 
+const renderNotificationDetail = (card) => {
+  if (!notificationDetailContent) return;
+
+  const notificationText = '🔔 Время повторить запись';
+  const sentAt = formatDateTime(card.lastNotificationAt);
+  const reason = notificationReasonLabel[card.lastNotificationReason] || formatValue(card.lastNotificationReason);
+  const deliveryMode = card.baseChannelMessageId ? 'reply к базовому сообщению' : 'отдельным сообщением';
+  const detailRows = [
+    ['Текст уведомления', notificationText],
+    ['Отправлено', sentAt],
+    ['Причина', reason],
+    ['Режим', deliveryMode],
+    ['Telegram message_id', formatValue(card.lastNotificationMessageId)],
+    ['Base message_id', formatValue(card.baseChannelMessageId)],
+    ['Pending message_id', formatValue(card.pendingChannelMessageId)],
+  ];
+
+  notificationDetailContent.innerHTML = `
+    <div class="card-detail__header">
+      <span class="status-chip status-chip--learning">🔔 Уведомление</span>
+      <span class="card-detail__next">Сработало для карточки</span>
+    </div>
+    <div class="card-detail__id-row">
+      <div class="card-detail__id-meta">
+        <span class="card-detail__id-label">ID карточки</span>
+        <span class="card-detail__id-value">${escapeHtml(card.id)}</span>
+      </div>
+      <button
+        class="button button--outline button--sm button--icon-only card-detail__id-copy"
+        type="button"
+        data-action="copy-card-id"
+        aria-label="Скопировать ID карточки"
+        title="Скопировать ID карточки"
+      >
+        ${copyIconSvg}
+      </button>
+    </div>
+    <div class="card-detail__preview">
+      <div class="card-detail__preview-text">${escapeHtml(notificationText)}</div>
+      <div class="detail-note">Отдельная страница без табов. Здесь видно, что именно ушло и к какой карточке это относится.</div>
+    </div>
+    <div class="detail-grid">
+      ${detailRows
+        .map(
+          ([label, value]) => `
+        <div class="detail-row">
+          <span class="detail-label">${escapeHtml(label)}</span>
+          <span class="detail-value">${escapeHtml(String(value))}</span>
+        </div>
+      `,
+        )
+        .join('')}
+    </div>
+    <div class="card-detail__preview">
+      ${renderPreview(card)}
+    </div>
+  `;
+};
+
+const openNotificationDetail = async (cardId) => {
+  const card = await loadCardById(cardId);
+  if (!card) {
+    tg.showAlert('Карточка не найдена. Попробуйте обновить список.');
+    return;
+  }
+
+  currentCardId = cardId;
+  renderNotificationDetail(card);
+  switchView('notification-detail');
+};
+
+const refreshNotificationDetail = () => {
+  if (!currentCardId) return;
+  const card = cardsData.find((item) => item.id === currentCardId);
+  if (!card) return;
+  renderNotificationDetail(card);
+};
+
 const toggleArchiveCard = async (cardId, actionButton = null) => {
   const card = cardsData.find((item) => item.id === cardId);
-  const isArchived = card ? card.status === 'archived' : false;
+  if (!card) {
+    tg.showAlert('Карточка не найдена.');
+    return false;
+  }
 
-  return runButtonAction(
-    { cardId, action: 'toggle-archive', button: actionButton, pendingText: 'Обновляю…' },
-    async () => {
-      try {
-        const updated = await requestArchiveChange(cardId, isArchived);
-        if (!updated) {
-          return false;
-        }
-        await loadCards();
-        return true;
-      } catch (error) {
-        await loadCards();
-        throw error;
-      }
-    },
-  );
+  const isArchived = card.status === 'archived';
+  const key = `${String(cardId)}:toggle-archive`;
+  if (actionLocks.has(key)) {
+    return false;
+  }
+
+  actionLocks.add(key);
+  try {
+    const confirmed = await confirmArchiveChange(isArchived);
+    if (!confirmed) {
+      return false;
+    }
+
+    setBusyButtonState(actionButton, true, 'Обновляю…');
+    try {
+      const status = isArchived ? 'learning' : 'archived';
+      await updateCardStatus(cardId, status);
+      await loadCards();
+      return true;
+    } catch (error) {
+      await loadCards();
+      throw error;
+    } finally {
+      setBusyButtonState(actionButton, false);
+    }
+  } finally {
+    actionLocks.delete(key);
+  }
 };
 
 const sendReminderNow = async (cardId, actionButton = null) => {
@@ -980,57 +1100,60 @@ const sendReminderNow = async (cardId, actionButton = null) => {
     return false;
   }
 
-  return runButtonAction(
-    {
-      cardId,
-      action: 'send-reminder',
-      button: actionButton,
-      pendingText: 'Отправляю...',
-    },
-    async () => {
-      const confirmed = await showConfirmDialog({
-        title: 'Отправить напоминание сейчас?',
-        body: 'Кликните «Отправить», и я сразу перешлю напоминание в ваш Telegram.',
-        confirmLabel: 'Отправить',
-        cancelLabel: 'Отмена',
-        confirmTone: 'primary',
+  const key = `${String(cardId)}:send-reminder`;
+  if (actionLocks.has(key)) {
+    return false;
+  }
+
+  actionLocks.add(key);
+  try {
+    const confirmed = await showConfirmDialog({
+      title: 'Отправить напоминание сейчас?',
+      body: 'Кликните «Отправить», и я сразу перешлю напоминание в ваш Telegram.',
+      confirmLabel: 'Отправить',
+      cancelLabel: 'Отмена',
+      confirmTone: 'primary',
+    });
+    if (!confirmed) {
+      return false;
+    }
+
+    setBusyButtonState(actionButton, true, 'Отправляю...');
+    try {
+      await apiCall(`/api/miniapp/cards/${cardId}/send-reminder`, {
+        method: 'POST',
       });
-      if (!confirmed) {
-        return false;
+
+      if (typeof tg.HapticFeedback?.notificationOccurred === 'function') {
+        tg.HapticFeedback.notificationOccurred('success');
       }
 
-      try {
-        await apiCall(`/api/miniapp/cards/${cardId}/send-reminder`, {
-          method: 'POST',
-        });
-
-        if (typeof tg.HapticFeedback?.notificationOccurred === 'function') {
-          tg.HapticFeedback.notificationOccurred('success');
-        }
-
-        tg.showAlert('Напоминание отправлено');
-        await loadCards();
-        if (currentView === 'card-detail' && currentCardId === cardId) {
-          refreshCardDetail();
-        }
-        return true;
-      } catch (error) {
-        console.error('Failed to send reminder now', error);
-        const parsedMessage = getErrorMessage(error);
-        const parsedStatus = parseApiError(error).status;
-        if (parsedStatus === 409) {
-          tg.showAlert('Карточка ещё не активирована. Оцените хотя бы одну карточку, чтобы начать.');
-          return false;
-        }
-        if (parsedStatus === 404) {
-          tg.showAlert('Карточка не найдена или была удалена.');
-          return false;
-        }
-        tg.showAlert(`Не удалось отправить напоминание: ${parsedMessage}`);
+      tg.showAlert('Напоминание отправлено');
+      await loadCards();
+      if (currentView === 'card-detail' && currentCardId === cardId) {
+        refreshCardDetail();
+      }
+      return true;
+    } catch (error) {
+      console.error('Failed to send reminder now', error);
+      const parsedMessage = getErrorMessage(error);
+      const parsedStatus = parseApiError(error).status;
+      if (parsedStatus === 409) {
+        tg.showAlert('Карточка ещё не активирована. Оцените хотя бы одну карточку, чтобы начать.');
         return false;
       }
-    },
-  );
+      if (parsedStatus === 404) {
+        tg.showAlert('Карточка не найдена или была удалена.');
+        return false;
+      }
+      tg.showAlert(`Не удалось отправить напоминание: ${parsedMessage}`);
+      return false;
+    } finally {
+      setBusyButtonState(actionButton, false);
+    }
+  } finally {
+    actionLocks.delete(key);
+  }
 };
 
 // Attach swipe listeners using CardSwipe module
@@ -1366,6 +1489,10 @@ if (cardBackBtn) {
   cardBackBtn.addEventListener('click', () => switchView('cards'));
 }
 
+if (notificationBackBtn) {
+  notificationBackBtn.addEventListener('click', () => switchView('cards'));
+}
+
 if (cardDetailContent) {
   cardDetailContent.addEventListener('click', async (event) => {
     const actionButton = event.target.closest('[data-action]');
@@ -1374,20 +1501,6 @@ if (cardDetailContent) {
 
     const card = cardsData.find((item) => item.id === currentCardId);
     if (!card) return;
-
-    if (actionButton.dataset.action === 'open-message') {
-      if (actionButton.disabled) {
-        tg.showAlert('Ссылка на исходное сообщение пока недоступна');
-        return;
-      }
-      const link = getMessageLink(card);
-      if (!link) {
-        tg.showAlert('Не удалось сформировать ссылку на сообщение.');
-        return;
-      }
-      openTelegramLink(link);
-      return;
-    }
 
     if (actionButton.dataset.action === 'toggle-archive') {
       try {
@@ -1403,6 +1516,7 @@ if (cardDetailContent) {
 
     if (actionButton.dataset.action === 'send-reminder-now') {
       await sendReminderNow(card.id, actionButton);
+      return;
     }
 
     if (actionButton.dataset.action === 'copy-message-link') {
@@ -1426,6 +1540,42 @@ if (cardDetailContent) {
           tg.showAlert('Не удалось скопировать ссылку');
         }
       );
+      return;
+    }
+
+    if (actionButton.dataset.action === 'copy-card-id') {
+      const copied = await copyToClipboard(card.id);
+      if (copied) {
+        if (typeof tg.HapticFeedback?.notificationOccurred === 'function') {
+          tg.HapticFeedback.notificationOccurred('success');
+        }
+        tg.showAlert('ID карточки скопирован');
+      } else {
+        tg.showAlert('Не удалось скопировать ID карточки');
+      }
+    }
+  });
+}
+
+if (notificationDetailContent) {
+  notificationDetailContent.addEventListener('click', async (event) => {
+    const actionButton = event.target.closest('[data-action]');
+    if (!actionButton) return;
+    if (!currentCardId) return;
+
+    const card = cardsData.find((item) => item.id === currentCardId);
+    if (!card) return;
+
+    if (actionButton.dataset.action === 'copy-card-id') {
+      const copied = await copyToClipboard(card.id);
+      if (copied) {
+        if (typeof tg.HapticFeedback?.notificationOccurred === 'function') {
+          tg.HapticFeedback.notificationOccurred('success');
+        }
+        tg.showAlert('ID карточки скопирован');
+      } else {
+        tg.showAlert('Не удалось скопировать ID карточки');
+      }
     }
   });
 }
@@ -1598,6 +1748,11 @@ document.getElementById('calendarContent').addEventListener('click', (event) => 
 });
 
 const initialLoad = () => {
+  if (initialDeepLink?.type === 'notification') {
+    void openNotificationDetail(initialDeepLink.cardId);
+    deepLinkHandled = true;
+    return;
+  }
   if (initialDeepLink?.type === 'view' && initialDeepLink.view !== 'cards') {
     switchView(initialDeepLink.view);
     deepLinkHandled = true;

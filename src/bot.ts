@@ -1,6 +1,6 @@
 import dayjs from 'dayjs';
 import { Context, Markup, Telegraf } from 'telegraf';
-import { Update, Message } from 'telegraf/typings/core/types/typegram';
+import { Update, Message, InlineKeyboardMarkup } from 'telegraf/typings/core/types/typegram';
 import { v4 as uuid } from 'uuid';
 import { CardStore, ReminderMode } from './db';
 import { config } from './config';
@@ -50,6 +50,7 @@ interface PendingScheduleInput {
   cardId: string;
   ctx: 'a' | 'r'; // 'a' = adding card, 'r' = review reschedule
   messageId: number; // message to edit after parsing
+  chatId: number | string;
 }
 const pendingScheduleInputs = new Map<string, PendingScheduleInput>();
 const SCHEDULE_INPUT_TTL_MS = 5 * 60_000;
@@ -432,6 +433,33 @@ export const createBot = (store: CardStore) => {
     }
   };
 
+  const restoreCustomScheduleMessage = async ({
+    pending,
+    text,
+    replyMarkup,
+  }: {
+    pending: PendingScheduleInput;
+    text: string;
+    replyMarkup?: InlineKeyboardMarkup;
+  }) => {
+    if (!pending.chatId || pending.messageId <= 0) {
+      return false;
+    }
+    try {
+      await bot.telegram.editMessageText(
+        pending.chatId,
+        pending.messageId,
+        undefined,
+        text,
+        replyMarkup ? { reply_markup: replyMarkup } : undefined,
+      );
+      return true;
+    } catch (error) {
+      logger.warn('Не удалось обновить сообщение после ввода расписания', error);
+      return false;
+    }
+  };
+
   // Authorization Middleware
   bot.use(async (ctx, next) => {
     const userId = ctx.from?.id;
@@ -660,10 +688,21 @@ export const createBot = (store: CardStore) => {
               store.updateCardReminderMode(pending.cardId, 'schedule', ruleStr),
             );
             const nextReviewAt = computeNextFromSchedule(rule);
-            await withDbRetry(() => store.activateCard(pending.cardId, { nextReviewAt }));
-            await ctx.reply(
-              `${buildAddedMessage('schedule', ruleStr)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`,
+            const activatedCard = await withDbRetry(() =>
+              store.activateCard(pending.cardId, { nextReviewAt }),
             );
+            const successMessage =
+              `${buildAddedMessage('schedule', ruleStr)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`;
+            const restored = await restoreCustomScheduleMessage({
+              pending,
+              text: successMessage,
+              replyMarkup: buildReminderManagementKeyboard(activatedCard.id).reply_markup,
+            });
+            if (!restored) {
+              await ctx.reply(successMessage, {
+                reply_markup: buildReminderManagementKeyboard(activatedCard.id).reply_markup,
+              });
+            }
           } else if (pending.ctx === 'r') {
             // Review reschedule flow
             await withDbRetry(() =>
@@ -678,11 +717,36 @@ export const createBot = (store: CardStore) => {
                 reviewedAt: new Date().toISOString(),
               }),
             );
-            await ctx.reply(
-              `Расписание: ${scheduleRuleLabel(rule)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`,
+            const successMessage = `Расписание: ${scheduleRuleLabel(rule)}\nСледующее напоминание ${formatNextReviewMessage(nextReviewAt)}`;
+            const updatedCard = await withDbRetry(() =>
+              store.getCardById(pending.cardId),
             );
+            const restored = await restoreCustomScheduleMessage({
+              pending,
+              text: successMessage,
+              replyMarkup: buildReminderManagementKeyboard(updatedCard.id).reply_markup,
+            });
+            if (!restored) {
+              await ctx.reply(successMessage, {
+                reply_markup: buildReminderManagementKeyboard(updatedCard.id).reply_markup,
+              });
+            }
           } else {
-            await ctx.reply('Эта карточка уже обработана');
+            const handledMessage = 'Эта карточка уже обработана';
+            const restoreText = card.contentPreview
+              ? `${card.contentPreview}\n${handledMessage}`
+              : handledMessage;
+            const restored = await restoreCustomScheduleMessage({
+              pending,
+              text: restoreText,
+              replyMarkup:
+                card.status === 'awaiting_grade'
+                  ? buildAdjustKeyboard(card.id).reply_markup
+                  : buildReminderManagementKeyboard(card.id).reply_markup,
+            });
+            if (!restored) {
+              await ctx.reply(handledMessage);
+            }
           }
         } catch (error) {
           logger.error('Ошибка обработки текстового расписания', error);
@@ -912,11 +976,17 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const userId = `${ctx.from?.id}`;
+    const fromUserId = ctx.from?.id;
+    if (!fromUserId) {
+      await ctx.answerCbQuery('Не удалось определить пользователя', { show_alert: true });
+      return;
+    }
+    const userId = `${fromUserId}`;
     pendingScheduleInputs.set(userId, {
       cardId,
       ctx: schedCtx,
       messageId: ctx.callbackQuery?.message?.message_id ?? 0,
+      chatId: ctx.chat?.id ?? fromUserId,
     });
     // Auto-cleanup after TTL
     setTimeout(() => {

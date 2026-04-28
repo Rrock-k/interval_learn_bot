@@ -20,6 +20,17 @@ Telegram-бот для интервального повторения (SM-2). T
 - **Dashboard**: `/api/cards/*` — `requireDashboardAuth` (DASHBOARD_SECRET)
 - Никогда не вызывай Dashboard-эндпоинты из Mini App (вернёт 302).
 
+## Метод проверки UI-регрессий
+
+- Не выводи состояние UI только из сборки или server logs: открой реальный runtime и проверь console.
+- Сначала докажи, что клиентский JS стартовал, затем кликай критичные элементы и сверяй видимое состояние.
+- Отделяй ожидаемые ошибки внешнего контекста/авторизации от поломки bootstrap или навигации.
+- Для локальной проверки Mini App не запускай второй `bot.launch()`: подними только HTTP-сервер на отдельном `PORT`, чтобы не дублировать Telegram polling.
+
+```bash
+PORT=3107 npx tsx -e 'import { config } from "./src/config"; import { CardStore } from "./src/db"; import { createBot } from "./src/bot"; import { ReviewScheduler } from "./src/reviewScheduler"; import { createHttpServer } from "./src/httpServer"; (async () => { const store = new CardStore(config.databaseUrl); await store.init(); const bot = createBot(store); const scheduler = new ReviewScheduler(store, bot); const server = createHttpServer(store, scheduler, bot); const shutdown = async () => { server.close(); await store.close(); process.exit(0); }; process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown); })().catch((error) => { console.error(error); process.exit(1); });'
+```
+
 ## Жизненный цикл карточки
 
 `pending` → `learning` → `awaiting_grade` → (повтор или `archived`)
