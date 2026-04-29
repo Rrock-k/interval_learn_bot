@@ -161,6 +161,29 @@ export class ReviewScheduler {
         logger.info(
           `[ReviewScheduler sendStoredBaseMessage] card=${card.id} reason=${reason} withKeyboard=${withKeyboard} target=${targetChatId} contentType=${card.contentType}`,
         );
+        const replyMarkup = withKeyboard ? { reply_markup: keyboard.reply_markup } : {};
+        try {
+          const copiedMessage = await this.bot.telegram.copyMessage(
+            targetChatId,
+            card.sourceChatId,
+            card.sourceMessageId,
+            replyMarkup,
+          );
+          const messageId = copiedMessage.message_id;
+          card.baseChannelMessageId = messageId;
+          await withDbRetry(() =>
+            this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
+          );
+          logger.info(
+            `[ReviewScheduler sendStoredBaseMessage:copied_source] card=${card.id} reason=${reason} source=${card.sourceChatId}:${card.sourceMessageId} messageId=${messageId}`,
+          );
+          return messageId;
+        } catch (error) {
+          logger.warn(
+            `Не удалось скопировать исходное сообщение карточки ${card.id}, пересобираю из сохранённых данных`,
+            error,
+          );
+        }
         const preview =
           normalizePreview(card.contentPreview) ??
           (card.contentType === 'photo'
@@ -168,7 +191,6 @@ export class ReviewScheduler {
             : card.contentType === 'video'
               ? '[Видео]'
               : 'Карточка без текста');
-        const replyMarkup = withKeyboard ? { reply_markup: keyboard.reply_markup } : {};
         let messageId: number;
         if (card.contentType === 'photo' && card.contentFileId) {
           try {
