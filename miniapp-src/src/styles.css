@@ -1,25 +1,25 @@
--face {
+@font-face {
   font-family: "Wix Madefor Display Trial";
   src: url("./assets/fonts/trial/wix-madefor-display-regular.ttf") format("truetype");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
--face {
+@font-face {
   font-family: "Wix Madefor Display Trial";
   src: url("./assets/fonts/trial/wix-madefor-display-medium.ttf") format("truetype");
   font-weight: 500;
   font-style: normal;
   font-display: swap;
 }
--face {
+@font-face {
   font-family: "Wix Madefor Display Trial";
   src: url("./assets/fonts/trial/wix-madefor-display-semibold.ttf") format("truetype");
   font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
--face {
+@font-face {
   font-family: "Wix Madefor Display Trial";
   src: url("./assets/fonts/trial/wix-madefor-display-bold.ttf") format("truetype");
   font-weight: 700 800;
@@ -357,7 +357,18 @@ h1, h2, h3, .app-kicker, .ui-tabs-trigger, .ui-button, .ui-badge, .ui-input, .ui
 .cards-stack { display: grid; gap: var(--space-3); }
 .card-row { display: grid; gap: var(--space-3); padding: var(--space-4); cursor: pointer; }
 .card-row-top, .card-row-bottom { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
-.card-row-text { margin: 0; color: var(--text-primary); font-size: var(--type-body); font-weight: 500; line-height: 1.42; overflow-wrap: anywhere; }
+.card-row-text {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--type-body);
+  font-weight: 500;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
 .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 .meta-text { color: var(--text-secondary); font-size: var(--type-label); line-height: 1.35; }
 .label-text { display: block; color: var(--text-secondary); font-size: var(--type-label); font-weight: 560; margin-bottom: var(--space-2); }
@@ -371,6 +382,9 @@ h1, h2, h3, .app-kicker, .ui-tabs-trigger, .ui-button, .ui-badge, .ui-input, .ui
 .preview-panel p { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: 1.48; overflow-wrap: anywhere; }
 .preview-icon { color: var(--text-secondary); }
 .detail-actions { display: grid; gap: var(--space-2); }
+.one-time-panel { display: grid; gap: var(--space-3); padding: var(--space-4); }
+.one-time-panel p { margin: 0; }
+.one-time-presets { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .detail-accordion { display: grid; gap: var(--space-2); }
 .details-card { padding: var(--space-4); }
 .kv-list { display: grid; gap: var(--space-3); }
@@ -404,6 +418,14 @@ h1, h2, h3, .app-kicker, .ui-tabs-trigger, .ui-button, .ui-badge, .ui-input, .ui
 .stat-card span { color: var(--text-secondary); font-size: var(--type-label); font-weight: 560; text-transform: uppercase; letter-spacing: .04em; }
 .stat-card strong { color: var(--text-primary); font-size: 32px; font-weight: 650; letter-spacing: -0.04em; line-height: 1; }
 .stat-card p { margin: 0; color: var(--text-secondary); font-size: var(--type-label); }
+.settings-panel { display: grid; gap: var(--space-3); padding: var(--space-4); }
+.settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.settings-heading h2 { margin: 0 0 var(--space-1); font-size: var(--type-section-title); }
+.settings-heading p, .settings-error { margin: 0; color: var(--text-secondary); font-size: var(--type-body-small); line-height: 1.45; }
+.settings-error { color: var(--danger); }
+.settings-field { display: grid; gap: var(--space-2); }
+.settings-field span { color: var(--text-secondary); font-size: var(--type-label); font-weight: 560; }
+.settings-time-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
 .state-block { padding: var(--space-5); text-align: center; }
 .state-block h2 { margin: 0 0 var(--space-2); font-size: var(--type-section-title); }
 .state-block p { margin: 0; color: var(--text-secondary); font-size: var(--type-body-small); line-height: 1.45; }

@@ -39,7 +39,7 @@ import { cn } from './lib/utils';
 type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 type ViewName = 'cards' | 'calendar' | 'stats' | 'card-detail' | 'notification-detail';
 type SortMode = 'nextReviewAsc' | 'nextReviewDesc' | 'updatedDesc' | 'repetitionDesc';
-type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override';
+type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
 
 type CardRecord = {
   id: string;
@@ -73,6 +73,13 @@ type Stats = {
   learning: number;
   awaitingGrade: number;
   archived: number;
+};
+
+type ReminderSettings = {
+  timezone: string;
+  activeHoursStart: number;
+  activeHoursEnd: number;
+  minGapMinutes: number;
 };
 
 type TelegramWebApp = {
@@ -124,6 +131,7 @@ const notificationReasonLabel: Record<NotificationReason, string> = {
   scheduled: 'по расписанию',
   manual_now: 'вручную',
   manual_override: 'дата вручную',
+  one_time: 'одноразовое',
 };
 
 const demoCards: CardRecord[] = [
@@ -189,6 +197,13 @@ const demoCards: CardRecord[] = [
   },
 ];
 
+const demoReminderSettings: ReminderSettings = {
+  timezone: 'Asia/Tbilisi',
+  activeHoursStart: 10 * 60,
+  activeHoursEnd: 22 * 60,
+  minGapMinutes: 30,
+};
+
 const isDemoMode = () => new URLSearchParams(window.location.search).has('demo');
 
 const showAlert = (message: string) => tg.showAlert?.(message) || window.alert(message);
@@ -201,7 +216,12 @@ const parseStartParam = () => {
     params.get('startapp') ||
     params.get('start_param');
   if (!raw) return null;
-  const decoded = decodeURIComponent(raw);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
   if (decoded.startsWith('card_')) return { type: 'card' as const, cardId: decoded.slice(5) };
   if (decoded.startsWith('notification_')) return { type: 'notification' as const, cardId: decoded.slice(13) };
   if (decoded.startsWith('view_')) return { type: 'view' as const, view: decoded.slice(5) as ViewName };
@@ -227,6 +247,36 @@ const formatTimeOnly = (iso?: string | null) => {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+};
+
+const toDatetimeLocalValue = (date: Date) => {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const parseDatetimeLocalValue = (value: string) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) return null;
+  return date.toISOString();
+};
+
+const minutesToTimeValue = (minutes: number) => {
+  const normalized = Math.max(0, Math.min(24 * 60, Math.round(minutes)));
+  const hours = Math.floor(normalized / 60);
+  const mins = normalized % 60;
+  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+};
+
+const timeValueToMinutes = (value: string) => {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+  if (hours < 0 || hours > 24 || minutes < 0 || minutes > 59) return null;
+  if (hours === 24 && minutes !== 0) return null;
+  return hours * 60 + minutes;
 };
 
 const toDateKey = (value: string | Date) => {
@@ -279,6 +329,9 @@ export function App() {
   const [view, setView] = useState<ViewName>('cards');
   const [cards, setCards] = useState<CardRecord[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [reminderSettings, setReminderSettings] = useState<ReminderSettings | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<CardStatus | 'all'>('all');
   const [sortMode, setSortMode] = useState<SortMode>('nextReviewAsc');
   const [query, setQuery] = useState('');
@@ -347,12 +400,31 @@ export function App() {
   };
 
   const loadStats = async () => {
+    setStatsError(null);
     if (demo) {
       setStats(buildStats(cards.length ? cards : demoCards));
       return;
     }
-    const result = await apiCall<{ data: Stats }>('/api/miniapp/stats');
-    setStats(result.data);
+    try {
+      const result = await apiCall<{ data: Stats }>('/api/miniapp/stats');
+      setStats(result.data);
+    } catch (err) {
+      setStatsError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const loadReminderSettings = async () => {
+    setSettingsError(null);
+    if (demo) {
+      setReminderSettings(demoReminderSettings);
+      return;
+    }
+    try {
+      const result = await apiCall<{ data: ReminderSettings }>('/api/miniapp/settings/reminders');
+      setReminderSettings(result.data);
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   useEffect(() => {
@@ -376,7 +448,10 @@ export function App() {
   }, [loading, cards.length]);
 
   useEffect(() => {
-    if (view === 'stats') void loadStats();
+    if (view === 'stats') {
+      void loadStats();
+      void loadReminderSettings();
+    }
   }, [view]);
 
   const visibleCards = useMemo(() => {
@@ -452,6 +527,41 @@ export function App() {
     });
   };
 
+  const requestOneTimeReminder = async (card: CardRecord, remindAt: string) => {
+    setBusyKey(`one-time:${card.id}`);
+    try {
+      if (!demo) {
+        await apiCall(`/api/miniapp/cards/${card.id}/one-time-reminder`, {
+          method: 'POST',
+          body: JSON.stringify({ remindAt }),
+        });
+      }
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      showAlert('Одноразовое напоминание назначено');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const saveReminderSettings = async (settings: ReminderSettings) => {
+    setBusyKey('settings:reminders');
+    try {
+      if (!demo) {
+        const result = await apiCall<{ data: ReminderSettings }>('/api/miniapp/settings/reminders', {
+          method: 'POST',
+          body: JSON.stringify(settings),
+        });
+        setReminderSettings(result.data);
+      } else {
+        setReminderSettings(settings);
+      }
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      showAlert('Настройки напоминаний сохранены');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const runConfirm = async () => {
     if (!confirm) return;
     const action = confirm.action;
@@ -511,7 +621,14 @@ export function App() {
         ) : null}
 
         {view === 'card-detail' && selectedCard ? (
-          <CardDetail card={selectedCard} onBack={() => setView('cards')} onReminder={requestReminder} onArchive={requestArchive} busyKey={busyKey} />
+          <CardDetail
+            card={selectedCard}
+            onBack={() => setView('cards')}
+            onReminder={requestReminder}
+            onOneTimeReminder={requestOneTimeReminder}
+            onArchive={requestArchive}
+            busyKey={busyKey}
+          />
         ) : null}
 
         {view === 'notification-detail' && selectedCard ? <NotificationDetail card={selectedCard} onBack={() => setView('cards')} /> : null}
@@ -520,7 +637,17 @@ export function App() {
           <CalendarScreen cards={scheduledCards} month={calendarMonth} setMonth={setCalendarMonth} selectedDate={selectedDate} setSelectedDate={setSelectedDate} onOpen={openCard} />
         ) : null}
 
-        {view === 'stats' ? <StatsScreen stats={stats || buildStats(cards)} loading={!stats} /> : null}
+        {view === 'stats' ? (
+          <StatsScreen
+            stats={stats || buildStats(cards)}
+            loading={!stats && !statsError}
+            error={statsError}
+            reminderSettings={reminderSettings}
+            settingsError={settingsError}
+            settingsSaving={busyKey === 'settings:reminders'}
+            onSaveReminderSettings={saveReminderSettings}
+          />
+        ) : null}
       </main>
 
       <Dialog open={Boolean(confirm)} onOpenChange={(open) => !open && setConfirm(null)}>
@@ -629,9 +756,52 @@ function CardListItem({ card, onOpen, onArchive, onReminder, busyKey }: { card: 
   );
 }
 
-function CardDetail({ card, onBack, onReminder, onArchive, busyKey }: { card: CardRecord; onBack: () => void; onReminder: (card: CardRecord) => void; onArchive: (card: CardRecord) => void; busyKey: string | null }) {
+function CardDetail({
+  card,
+  onBack,
+  onReminder,
+  onOneTimeReminder,
+  onArchive,
+  busyKey,
+}: {
+  card: CardRecord;
+  onBack: () => void;
+  onReminder: (card: CardRecord) => void;
+  onOneTimeReminder: (card: CardRecord, remindAt: string) => Promise<void>;
+  onArchive: (card: CardRecord) => void;
+  busyKey: string | null;
+}) {
   const messageLink = getMessageLink(card);
   const canRemind = card.status !== 'archived' && card.status !== 'pending';
+  const [oneTimeValue, setOneTimeValue] = useState(() => toDatetimeLocalValue(new Date(Date.now() + 60 * 60_000)));
+  const [showOneTimePanel, setShowOneTimePanel] = useState(false);
+  const setOneTimePreset = (mode: 'hour' | 'evening' | 'morning') => {
+    const date = new Date();
+    if (mode === 'hour') {
+      date.setTime(Date.now() + 60 * 60_000);
+    }
+    if (mode === 'evening') {
+      date.setHours(20, 0, 0, 0);
+      if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1);
+    }
+    if (mode === 'morning') {
+      date.setDate(date.getDate() + 1);
+      date.setHours(10, 0, 0, 0);
+    }
+    setOneTimeValue(toDatetimeLocalValue(date));
+  };
+  const submitOneTimeReminder = () => {
+    const remindAt = parseDatetimeLocalValue(oneTimeValue);
+    if (!remindAt) {
+      showAlert('Выберите будущую дату и время');
+      return;
+    }
+    void onOneTimeReminder(card, remindAt)
+      .then(() => setShowOneTimePanel(false))
+      .catch((error) =>
+        showAlert(error instanceof Error ? error.message : 'Не удалось назначить напоминание'),
+      );
+  };
   return (
     <div className="detail-stack">
       <Button variant="outline" size="sm" className="back-button" onClick={onBack}><ChevronLeft size={16} />Назад</Button>
@@ -653,9 +823,27 @@ function CardDetail({ card, onBack, onReminder, onArchive, busyKey }: { card: Ca
       </Card>
       <div className="detail-actions">
         <Button disabled={!canRemind || busyKey === `reminder:${card.id}`} onClick={() => onReminder(card)}><Bell size={16} />Напомнить сейчас</Button>
+        <Button variant="outline" disabled={!canRemind} onClick={() => setShowOneTimePanel((value) => !value)}><CalendarDays size={16} />Напомнить один раз</Button>
         <Button variant="outline" disabled={!messageLink} onClick={() => messageLink && copyAndNotify(messageLink, 'Ссылка скопирована')}><Clipboard size={16} />Скопировать ссылку</Button>
         <Button variant="destructive" disabled={busyKey === `status:${card.id}`} onClick={() => onArchive(card)}><Archive size={16} />{card.status === 'archived' ? 'Разархивировать' : 'Архивировать'}</Button>
       </div>
+      {showOneTimePanel ? (
+        <Card className="one-time-panel">
+          <div>
+            <span className="label-text">Одноразовое напоминание</span>
+            <p className="meta-text">Не меняет интервальное расписание карточки.</p>
+          </div>
+          <div className="one-time-presets">
+            <Button type="button" variant="ghost" size="sm" onClick={() => setOneTimePreset('hour')}>Через час</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setOneTimePreset('evening')}>Вечером</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setOneTimePreset('morning')}>Завтра утром</Button>
+          </div>
+          <Input type="datetime-local" value={oneTimeValue} onChange={(event) => setOneTimeValue(event.target.value)} disabled={!canRemind} />
+          <Button variant="outline" disabled={!canRemind || busyKey === `one-time:${card.id}`} onClick={submitOneTimeReminder}>
+            <CalendarDays size={16} />Назначить
+          </Button>
+        </Card>
+      ) : null}
       <Accordion type="multiple" className="detail-accordion">
         <AccordionItem value="history">
           <AccordionTrigger><Clock3 size={16} />История</AccordionTrigger>
@@ -671,7 +859,7 @@ function CardDetail({ card, onBack, onReminder, onArchive, busyKey }: { card: Ca
 }
 
 function NotificationDetail({ card, onBack }: { card: CardRecord; onBack: () => void }) {
-  const rows = [
+  const rows: Array<[string, string | number]> = [
     ['Текст', 'Время повторить запись'],
     ['Отправлено', formatDateTime(card.lastNotificationAt)],
     ['Причина', card.lastNotificationReason ? notificationReasonLabel[card.lastNotificationReason] : '—'],
@@ -753,17 +941,125 @@ function DaySection({ dateKey, cards, onOpen }: { dateKey: string; cards: CardRe
   );
 }
 
-function StatsScreen({ stats, loading }: { stats: Stats; loading: boolean }) {
+function StatsScreen({
+  stats,
+  loading,
+  error,
+  reminderSettings,
+  settingsError,
+  settingsSaving,
+  onSaveReminderSettings,
+}: {
+  stats: Stats;
+  loading: boolean;
+  error: string | null;
+  reminderSettings: ReminderSettings | null;
+  settingsError: string | null;
+  settingsSaving: boolean;
+  onSaveReminderSettings: (settings: ReminderSettings) => Promise<void>;
+}) {
+  if (error) return <StateBlock title="Не удалось загрузить статистику" body={error} />;
   if (loading) return <StateBlock title="Загрузка статистики" body="Считаем текущий прогресс." />;
   return (
-    <div className="stats-grid">
-      <Card className="stat-card wide"><span>Всего карточек</span><strong>{stats.total}</strong><p>в аккаунте</p></Card>
-      <Card className="stat-card"><span>Сегодня</span><strong>{stats.dueToday}</strong></Card>
-      <Card className="stat-card"><span>Ожидают</span><strong>{stats.pending}</strong></Card>
-      <Card className="stat-card"><span>Изучаются</span><strong>{stats.learning}</strong></Card>
-      <Card className="stat-card"><span>Ждут оценки</span><strong>{stats.awaitingGrade}</strong></Card>
-      <Card className="stat-card"><span>Архив</span><strong>{stats.archived}</strong></Card>
-    </div>
+    <>
+      <div className="stats-grid">
+        <Card className="stat-card wide"><span>Всего карточек</span><strong>{stats.total}</strong><p>в аккаунте</p></Card>
+        <Card className="stat-card"><span>Сегодня</span><strong>{stats.dueToday}</strong></Card>
+        <Card className="stat-card"><span>Ожидают</span><strong>{stats.pending}</strong></Card>
+        <Card className="stat-card"><span>Изучаются</span><strong>{stats.learning}</strong></Card>
+        <Card className="stat-card"><span>Ждут оценки</span><strong>{stats.awaitingGrade}</strong></Card>
+        <Card className="stat-card"><span>Архив</span><strong>{stats.archived}</strong></Card>
+      </div>
+      <ReminderSettingsPanel
+        settings={reminderSettings}
+        error={settingsError}
+        saving={settingsSaving}
+        onSave={onSaveReminderSettings}
+      />
+    </>
+  );
+}
+
+function ReminderSettingsPanel({
+  settings,
+  error,
+  saving,
+  onSave,
+}: {
+  settings: ReminderSettings | null;
+  error: string | null;
+  saving: boolean;
+  onSave: (settings: ReminderSettings) => Promise<void>;
+}) {
+  const [timezone, setTimezone] = useState(settings?.timezone ?? demoReminderSettings.timezone);
+  const [start, setStart] = useState(minutesToTimeValue(settings?.activeHoursStart ?? demoReminderSettings.activeHoursStart));
+  const [end, setEnd] = useState(minutesToTimeValue(settings?.activeHoursEnd ?? demoReminderSettings.activeHoursEnd));
+  const [gap, setGap] = useState(String(settings?.minGapMinutes ?? demoReminderSettings.minGapMinutes));
+
+  useEffect(() => {
+    if (!settings) return;
+    setTimezone(settings.timezone);
+    setStart(minutesToTimeValue(settings.activeHoursStart));
+    setEnd(minutesToTimeValue(settings.activeHoursEnd));
+    setGap(String(settings.minGapMinutes));
+  }, [settings]);
+
+  const submit = () => {
+    const activeHoursStart = timeValueToMinutes(start);
+    const activeHoursEnd = timeValueToMinutes(end);
+    const minGapMinutes = Number(gap);
+    if (
+      activeHoursStart === null ||
+      activeHoursEnd === null ||
+      activeHoursStart >= activeHoursEnd ||
+      !Number.isInteger(minGapMinutes) ||
+      minGapMinutes < 1 ||
+      minGapMinutes > 360 ||
+      !timezone.trim()
+    ) {
+      showAlert('Проверьте часы активности и интервал между напоминаниями');
+      return;
+    }
+    void onSave({
+      timezone: timezone.trim(),
+      activeHoursStart,
+      activeHoursEnd,
+      minGapMinutes,
+    }).catch((err) => {
+      showAlert(err instanceof Error ? err.message : 'Не удалось сохранить настройки');
+    });
+  };
+
+  return (
+    <Card className="settings-panel">
+      <div className="settings-heading">
+        <div>
+          <h2>Доставка напоминаний</h2>
+          <p>Planner выбирает ближайший свободный слот внутри этих часов.</p>
+        </div>
+        {settings ? <Badge tone="muted">{minutesToTimeValue(settings.activeHoursStart)}-{minutesToTimeValue(settings.activeHoursEnd)}</Badge> : null}
+      </div>
+      {error ? <p className="settings-error">{error}</p> : null}
+      <label className="settings-field">
+        <span>Часовой пояс</span>
+        <Input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="Asia/Tbilisi" />
+      </label>
+      <div className="settings-time-grid">
+        <label className="settings-field">
+          <span>С</span>
+          <Input type="time" value={start} onChange={(event) => setStart(event.target.value)} />
+        </label>
+        <label className="settings-field">
+          <span>До</span>
+          <Input type="time" value={end} onChange={(event) => setEnd(event.target.value)} />
+        </label>
+      </div>
+      <label className="settings-field">
+        <span>Минимум между напоминаниями, мин</span>
+        <Input type="number" min={1} max={360} value={gap} onChange={(event) => setGap(event.target.value)} />
+      </label>
+      <Button disabled={saving} onClick={submit}>Сохранить настройки</Button>
+    </Card>
   );
 }
 
@@ -772,24 +1068,25 @@ function StateBlock({ title, body }: { title: string; body: string }) {
 }
 
 function History({ card }: { card: CardRecord }) {
-  const rows = [
+  const rows: Array<[string, string | number]> = [
     ['Создана', formatDateTime(card.createdAt)],
     ['Напоминание', formatDateTime(card.lastNotificationAt)],
     ['Ожидание оценки', formatDateTime(card.awaitingGradeSince)],
     ['Последний повтор', formatDateTime(card.lastReviewedAt)],
-  ].filter(([, value]) => value !== '—');
-  return <KeyValueRows rows={rows} />;
+  ];
+  return <KeyValueRows rows={rows.filter(([, value]) => value !== '—')} />;
 }
 
 function DetailsGrid({ card }: { card: CardRecord }) {
-  return <KeyValueRows rows={[
+  const rows: Array<[string, string | number]> = [
     ['Повторы', card.repetition],
     ['Статус', statusLabel[card.status]],
     ['Создана', formatDateTime(card.createdAt)],
     ['Обновлена', formatDateTime(card.updatedAt)],
     ['Чат', card.sourceChatId],
     ['Сообщение', card.sourceMessageId],
-  ]} />;
+  ];
+  return <KeyValueRows rows={rows} />;
 }
 
 function KeyValueRows({ rows }: { rows: Array<[string, string | number]> }) {
@@ -839,8 +1136,15 @@ async function copyAndNotify(value: string, message: string) {
 async function demoResponse<T>(endpoint: string, options: RequestInit, cards: CardRecord[], setCards: React.Dispatch<React.SetStateAction<CardRecord[]>>) {
   const source = cards.length ? cards : demoCards;
   if (endpoint.includes('/stats')) return { data: buildStats(source) } as T;
+  if (endpoint.includes('/settings/reminders')) {
+    if (options.method === 'POST' && typeof options.body === 'string') {
+      return { data: JSON.parse(options.body) } as T;
+    }
+    return { data: demoReminderSettings } as T;
+  }
   if (endpoint.includes('/status')) return { ok: true } as T;
   if (endpoint.includes('/send-reminder')) return { ok: true } as T;
+  if (endpoint.includes('/one-time-reminder')) return { ok: true } as T;
   const statusMatch = endpoint.match(/status=([^&]+)/);
   const data = statusMatch ? source.filter((card) => card.status === statusMatch[1]) : source;
   if (!cards.length) setCards(source);

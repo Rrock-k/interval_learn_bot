@@ -1,8 +1,23 @@
 import { Pool, PoolConfig } from 'pg';
+import { v4 as uuid } from 'uuid';
 import { withDbRetry } from './utils/dbRetry';
+import {
+  DEFAULT_DELIVERY_SETTINGS,
+  DeliverySettings,
+  planReminderDelivery,
+} from './reminderPlanner';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
-export type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override';
+export type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
+export type ReminderJobKind = 'review' | 'one_time' | 'manual_now';
+export type ReminderJobStatus =
+  | 'pending'
+  | 'sending'
+  | 'awaiting_action'
+  | 'completed'
+  | 'snoozed'
+  | 'cancelled'
+  | 'failed';
 
 export interface CardRecord {
   id: string;
@@ -54,6 +69,7 @@ export interface AwaitingGradeInput {
   channelId: string;
   channelMessageId: number;
   pendingSince: string;
+  baseMessageId?: number | null;
 }
 
 export interface ReviewResultInput {
@@ -70,12 +86,51 @@ export interface ListCardsParams {
 
 export interface RecordNotificationInput {
   cardId: string;
+  jobId?: string | null;
   messageId: number;
   reason: NotificationReason;
   sentAt: string;
 }
 
+export interface ReminderJobRecord {
+  id: string;
+  cardId: string;
+  userId: string;
+  kind: ReminderJobKind;
+  source: string;
+  status: ReminderJobStatus;
+  dueAt: string;
+  scheduledAt: string;
+  sentAt: string | null;
+  completedAt: string | null;
+  deliveryChatId: string | null;
+  deliveryMessageId: number | null;
+  baseMessageId: number | null;
+  snoozedFromJobId: string | null;
+  error: string | null;
+  metadata: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReminderJobWithCard {
+  job: ReminderJobRecord;
+  card: CardRecord;
+}
+
+export interface CreateReminderJobInput {
+  cardId: string;
+  userId: string;
+  kind: ReminderJobKind;
+  dueAt: string;
+  scheduledAt?: string | null;
+  source?: string;
+  snoozedFromJobId?: string | null;
+  metadata?: string | null;
+}
+
 export type ReminderMode = 'sm2' | 'schedule';
+export type UserReminderSettings = DeliverySettings;
 
 const parseSourceMessageIds = (value: unknown): number[] | null => {
   if (!value) {
@@ -133,6 +188,27 @@ const rowToCard = (row: any): CardRecord => ({
   lastNotificationAt: row.last_notification_at,
   lastNotificationReason: row.last_notification_reason as NotificationReason | null,
   lastNotificationMessageId: row.last_notification_message_id,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToReminderJob = (row: any): ReminderJobRecord => ({
+  id: row.id,
+  cardId: row.card_id,
+  userId: row.user_id,
+  kind: row.kind as ReminderJobKind,
+  source: row.source,
+  status: row.status as ReminderJobStatus,
+  dueAt: row.due_at,
+  scheduledAt: row.scheduled_at,
+  sentAt: row.sent_at,
+  completedAt: row.completed_at,
+  deliveryChatId: row.delivery_chat_id,
+  deliveryMessageId: row.delivery_message_id,
+  baseMessageId: row.base_message_id,
+  snoozedFromJobId: row.snoozed_from_job_id,
+  error: row.error,
+  metadata: row.metadata,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -256,7 +332,7 @@ export class CardStore {
 
   async resetUserBaseMessages(userId: string): Promise<void> {
     const now = new Date().toISOString();
-    await this.pool.query(
+    const { rows } = await this.pool.query(
       `
       UPDATE cards
       SET base_channel_message_id = NULL,
@@ -268,9 +344,174 @@ export class CardStore {
           updated_at = $1
       WHERE user_id = $2
         AND status IN ('learning', 'awaiting_grade')
+      RETURNING *
     `,
       [now, userId],
     );
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'cancelled',
+          completed_at = $1,
+          updated_at = $1
+      WHERE user_id = $2
+        AND status IN ('pending', 'sending', 'awaiting_action')
+        AND kind IN ('review', 'manual_now')
+    `,
+      [now, userId],
+    );
+    for (const row of rows) {
+      const card = rowToCard(row);
+      if (!card.nextReviewAt) continue;
+      await this.createReminderJob({
+        cardId: card.id,
+        userId: card.userId,
+        kind: 'review',
+        dueAt: card.nextReviewAt,
+        source: 'notification_chat_reset',
+      });
+    }
+  }
+
+  private async getDeliverySettings(userId: string): Promise<DeliverySettings> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT timezone, active_hours_start, active_hours_end, reminder_min_gap_minutes
+      FROM users
+      WHERE id = $1
+    `,
+      [userId],
+    );
+    const row = rows[0] ?? {};
+    return {
+      timezone: row.timezone ?? DEFAULT_DELIVERY_SETTINGS.timezone,
+      activeHoursStart: Number(row.active_hours_start ?? DEFAULT_DELIVERY_SETTINGS.activeHoursStart),
+      activeHoursEnd: Number(row.active_hours_end ?? DEFAULT_DELIVERY_SETTINGS.activeHoursEnd),
+      minGapMinutes: Number(row.reminder_min_gap_minutes ?? DEFAULT_DELIVERY_SETTINGS.minGapMinutes),
+    };
+  }
+
+  async getUserReminderSettings(userId: string): Promise<UserReminderSettings> {
+    return this.getDeliverySettings(userId);
+  }
+
+  async updateUserReminderSettings(
+    userId: string,
+    settings: UserReminderSettings,
+  ): Promise<UserReminderSettings> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE users
+      SET timezone = $1,
+          active_hours_start = $2,
+          active_hours_end = $3,
+          reminder_min_gap_minutes = $4,
+          updated_at = $5
+      WHERE id = $6
+    `,
+      [
+        settings.timezone,
+        settings.activeHoursStart,
+        settings.activeHoursEnd,
+        settings.minGapMinutes,
+        now,
+        userId,
+      ],
+    );
+    return this.getUserReminderSettings(userId);
+  }
+
+  private async planScheduledAt(userId: string, dueAt: string): Promise<string> {
+    const settings = await this.getDeliverySettings(userId);
+    const from = new Date(dueAt);
+    from.setDate(from.getDate() - 1);
+    const to = new Date(dueAt);
+    to.setDate(to.getDate() + 7);
+    const { rows } = await this.pool.query(
+      `
+      SELECT scheduled_at
+      FROM reminder_jobs
+      WHERE user_id = $1
+        AND status = 'pending'
+        AND scheduled_at >= $2
+        AND scheduled_at <= $3
+      ORDER BY scheduled_at ASC
+    `,
+      [userId, from.toISOString(), to.toISOString()],
+    );
+    return planReminderDelivery({
+      dueAt,
+      existingScheduledAt: rows.map((row) => row.scheduled_at),
+      settings,
+    });
+  }
+
+  async createReminderJob(input: CreateReminderJobInput): Promise<ReminderJobRecord> {
+    const now = new Date().toISOString();
+    if (input.kind === 'review' || input.kind === 'manual_now' || input.kind === 'one_time') {
+      await this.pool.query(
+        `
+        UPDATE reminder_jobs
+        SET status = 'cancelled',
+            completed_at = $1,
+            updated_at = $1
+        WHERE card_id = $2
+          AND kind = ANY($3::text[])
+          AND status = 'pending'
+      `,
+        [
+          now,
+          input.cardId,
+          input.kind === 'manual_now'
+            ? ['review', 'manual_now']
+            : input.kind === 'one_time'
+              ? ['one_time']
+              : ['review'],
+        ],
+      );
+    }
+    const scheduledAt = input.scheduledAt ?? (await this.planScheduledAt(input.userId, input.dueAt));
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO reminder_jobs (
+        id, card_id, user_id, kind, source, status,
+        due_at, scheduled_at, snoozed_from_job_id, metadata,
+        created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, 'pending',
+        $6, $7, $8, $9,
+        $10, $10
+      )
+      RETURNING *
+    `,
+      [
+        uuid(),
+        input.cardId,
+        input.userId,
+        input.kind,
+        input.source ?? input.kind,
+        input.dueAt,
+        scheduledAt,
+        input.snoozedFromJobId ?? null,
+        input.metadata ?? null,
+        now,
+      ],
+    );
+    const job = rowToReminderJob(rows[0]);
+    if (job.kind === 'review') {
+      await this.pool.query(
+        `
+        UPDATE cards
+        SET next_review_at = $1,
+            updated_at = $2
+        WHERE id = $3
+          AND status <> 'archived'
+      `,
+        [job.scheduledAt, now, job.cardId],
+      );
+    }
+    return job;
   }
 
   async createPendingCard(input: CreatePendingCardInput): Promise<CardRecord> {
@@ -367,7 +608,15 @@ export class CardStore {
     `,
       [input.nextReviewAt, now, id],
     );
-    return this.getCardById(id);
+    const card = await this.getCardById(id);
+    await this.createReminderJob({
+      cardId: card.id,
+      userId: card.userId,
+      kind: 'review',
+      dueAt: input.nextReviewAt,
+      source: 'activate',
+    });
+    return card;
   }
 
   async listDueCards(limit: number): Promise<CardRecord[]> {
@@ -384,6 +633,92 @@ export class CardStore {
       [new Date().toISOString(), limit],
     );
     return rows.map(rowToCard);
+  }
+
+  async listDueCardsWithoutActiveReviewJob(limit: number): Promise<CardRecord[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM cards
+      WHERE status = 'learning'
+        AND next_review_at IS NOT NULL
+        AND next_review_at <= $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM reminder_jobs
+          WHERE reminder_jobs.card_id = cards.id
+            AND reminder_jobs.kind IN ('review', 'manual_now')
+            AND reminder_jobs.status IN ('pending', 'sending', 'awaiting_action')
+        )
+      ORDER BY next_review_at ASC
+      LIMIT $2
+    `,
+      [new Date().toISOString(), limit],
+    );
+    return rows.map(rowToCard);
+  }
+
+  async listDueReminderJobs(limit: number): Promise<ReminderJobWithCard[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT to_jsonb(reminder_jobs) AS job, to_jsonb(cards) AS card
+      FROM reminder_jobs
+      JOIN cards ON cards.id = reminder_jobs.card_id
+      WHERE reminder_jobs.status = 'pending'
+        AND reminder_jobs.scheduled_at <= $1
+        AND cards.status <> 'archived'
+      ORDER BY reminder_jobs.scheduled_at ASC
+      LIMIT $2
+    `,
+      [new Date().toISOString(), limit],
+    );
+    return rows.map((row) => ({
+      job: rowToReminderJob(row.job),
+      card: rowToCard(row.card),
+    }));
+  }
+
+  async claimDueReminderJobs(limit: number): Promise<ReminderJobWithCard[]> {
+    const now = new Date().toISOString();
+    const staleSendingCutoff = new Date(Date.now() - 10 * 60_000).toISOString();
+    const { rows } = await this.pool.query(
+      `
+      WITH picked AS (
+        SELECT reminder_jobs.id
+        FROM reminder_jobs
+        JOIN cards ON cards.id = reminder_jobs.card_id
+        WHERE (
+            reminder_jobs.status = 'pending'
+            OR (
+              reminder_jobs.status = 'sending'
+              AND reminder_jobs.updated_at <= $3
+            )
+          )
+          AND reminder_jobs.scheduled_at <= $1
+          AND cards.status <> 'archived'
+        ORDER BY reminder_jobs.scheduled_at ASC
+        LIMIT $2
+        FOR UPDATE OF reminder_jobs SKIP LOCKED
+      ),
+      updated AS (
+        UPDATE reminder_jobs
+        SET status = 'sending',
+            error = NULL,
+            updated_at = $1
+        WHERE id IN (SELECT id FROM picked)
+        RETURNING *
+      )
+      SELECT to_jsonb(updated) AS job, to_jsonb(cards) AS card
+      FROM updated
+      JOIN cards ON cards.id = updated.card_id
+      ORDER BY updated.scheduled_at ASC
+    `,
+      [now, limit, staleSendingCutoff],
+    );
+    return rows.map((row) => ({
+      job: rowToReminderJob(row.job),
+      card: rowToCard(row.card),
+    }));
   }
 
   async listCards(params: ListCardsParams = {}): Promise<CardRecord[]> {
@@ -413,8 +748,37 @@ export class CardStore {
     return rows.map(rowToCard);
   }
 
-  async markAwaitingGrade(input: AwaitingGradeInput): Promise<void> {
-    await this.pool.query(
+  async listCardsByUser(params: ListCardsParams & { userId: string }): Promise<CardRecord[]> {
+    const limit = params.limit ?? 100;
+    if (params.status) {
+      const { rows } = await this.pool.query(
+        `
+        SELECT *
+        FROM cards
+        WHERE user_id = $1
+          AND status = $2
+        ORDER BY updated_at DESC
+        LIMIT $3
+      `,
+        [params.userId, params.status, limit],
+      );
+      return rows.map(rowToCard);
+    }
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM cards
+      WHERE user_id = $1
+      ORDER BY updated_at DESC
+      LIMIT $2
+    `,
+      [params.userId, limit],
+    );
+    return rows.map(rowToCard);
+  }
+
+  async markAwaitingGrade(input: AwaitingGradeInput & { jobId?: string | null }): Promise<void> {
+    const result = await this.pool.query(
       `
       UPDATE cards
       SET status = 'awaiting_grade',
@@ -423,9 +787,72 @@ export class CardStore {
           awaiting_grade_since = $3,
           updated_at = $3
       WHERE id = $4
+        AND status = 'learning'
     `,
       [input.channelId, input.channelMessageId, input.pendingSince, input.cardId],
     );
+    if (result.rowCount === 0) {
+      if (input.jobId) {
+        await this.cancelReminderJob(input.jobId);
+      }
+      throw new Error(`Card ${input.cardId} is archived or not found`);
+    }
+    if (input.jobId) {
+      await this.markReminderJobAwaitingAction({
+        jobId: input.jobId,
+        deliveryChatId: input.channelId,
+        deliveryMessageId: input.channelMessageId,
+        sentAt: input.pendingSince,
+        baseMessageId: input.baseMessageId ?? null,
+      });
+    }
+  }
+
+  async markReminderJobSending(jobId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'sending',
+          error = NULL,
+          updated_at = $1
+      WHERE id = $2
+        AND status IN ('pending', 'sending')
+    `,
+      [now, jobId],
+    );
+  }
+
+  async markReminderJobAwaitingAction(input: {
+    jobId: string;
+    deliveryChatId: string;
+    deliveryMessageId: number;
+    sentAt: string;
+    baseMessageId?: number | null;
+  }): Promise<void> {
+    const result = await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'awaiting_action',
+          sent_at = $1,
+          delivery_chat_id = $2,
+          delivery_message_id = $3,
+          base_message_id = $4,
+          updated_at = $1
+      WHERE id = $5
+        AND status = 'sending'
+    `,
+      [
+        input.sentAt,
+        input.deliveryChatId,
+        input.deliveryMessageId,
+        input.baseMessageId ?? null,
+        input.jobId,
+      ],
+    );
+    if (result.rowCount === 0) {
+      throw new Error(`Reminder job ${input.jobId} is not sending`);
+    }
   }
 
   async findAwaitingCard(cardId: string): Promise<CardRecord | null> {
@@ -436,7 +863,146 @@ export class CardStore {
     return rows.length ? rowToCard(rows[0]) : null;
   }
 
-  async saveReviewResult(input: ReviewResultInput): Promise<void> {
+  async getReminderJobWithCard(jobId: string): Promise<ReminderJobWithCard | null> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT to_jsonb(reminder_jobs) AS job, to_jsonb(cards) AS card
+      FROM reminder_jobs
+      JOIN cards ON cards.id = reminder_jobs.card_id
+      WHERE reminder_jobs.id = $1
+    `,
+      [jobId],
+    );
+    if (!rows.length) return null;
+    return {
+      job: rowToReminderJob(rows[0].job),
+      card: rowToCard(rows[0].card),
+    };
+  }
+
+  async findAwaitingReminderJob(jobId: string): Promise<ReminderJobWithCard | null> {
+    const found = await this.getReminderJobWithCard(jobId);
+    if (!found || found.job.status !== 'awaiting_action') return null;
+    return found;
+  }
+
+  async findAwaitingReviewJobByCard(cardId: string): Promise<ReminderJobWithCard | null> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT to_jsonb(reminder_jobs) AS job, to_jsonb(cards) AS card
+      FROM reminder_jobs
+      JOIN cards ON cards.id = reminder_jobs.card_id
+      WHERE reminder_jobs.card_id = $1
+        AND reminder_jobs.status = 'awaiting_action'
+        AND reminder_jobs.kind IN ('review', 'manual_now')
+      ORDER BY reminder_jobs.sent_at DESC NULLS LAST, reminder_jobs.updated_at DESC
+      LIMIT 1
+    `,
+      [cardId],
+    );
+    if (!rows.length) return null;
+    return {
+      job: rowToReminderJob(rows[0].job),
+      card: rowToCard(rows[0].card),
+    };
+  }
+
+  async completeReminderJob(jobId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'completed',
+          completed_at = $1,
+          updated_at = $1
+      WHERE id = $2
+        AND status IN ('pending', 'sending', 'awaiting_action')
+    `,
+      [now, jobId],
+    );
+  }
+
+  async cancelReminderJob(jobId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'cancelled',
+          completed_at = $1,
+          updated_at = $1
+      WHERE id = $2
+        AND status IN ('pending', 'sending', 'awaiting_action')
+    `,
+      [now, jobId],
+    );
+  }
+
+  async failReminderJob(jobId: string, error: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'failed',
+          completed_at = $1,
+          error = $2,
+          updated_at = $1
+      WHERE id = $3
+    `,
+      [now, error.slice(0, 500), jobId],
+    );
+  }
+
+  async snoozeReminderJob(jobId: string, minutes: number): Promise<ReminderJobRecord> {
+    const found = await this.findAwaitingReminderJob(jobId);
+    if (!found) {
+      throw new Error(`Reminder job ${jobId} is not awaiting action`);
+    }
+
+    const now = new Date().toISOString();
+    const delayMinutes = Math.max(1, Math.floor(minutes));
+    const dueAt = new Date(Date.now() + delayMinutes * 60_000).toISOString();
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'snoozed',
+          completed_at = $1,
+          updated_at = $1
+      WHERE id = $2
+        AND status = 'awaiting_grade'
+    `,
+      [now, jobId],
+    );
+
+    const snoozedJob = await this.createReminderJob({
+      cardId: found.card.id,
+      userId: found.card.userId,
+      kind: found.job.kind,
+      dueAt,
+      source: 'snooze',
+      snoozedFromJobId: found.job.id,
+      metadata: found.job.metadata,
+    });
+
+    if (found.job.kind === 'review' || found.job.kind === 'manual_now') {
+      await this.pool.query(
+        `
+        UPDATE cards
+        SET status = 'learning',
+            next_review_at = $1,
+            pending_channel_id = NULL,
+            pending_channel_message_id = NULL,
+            awaiting_grade_since = NULL,
+            updated_at = $2
+        WHERE id = $3
+      `,
+        [dueAt, now, found.card.id],
+      );
+    }
+
+    return snoozedJob;
+  }
+
+  async saveReviewResult(input: ReviewResultInput & { jobId?: string | null }): Promise<void> {
     await this.pool.query(
       `
       UPDATE cards
@@ -457,6 +1023,40 @@ export class CardStore {
         input.cardId,
       ],
     );
+    const completedAt = input.reviewedAt;
+    if (input.jobId) {
+      await this.pool.query(
+        `
+        UPDATE reminder_jobs
+        SET status = 'completed',
+            completed_at = $1,
+            updated_at = $1
+        WHERE id = $2
+      `,
+        [completedAt, input.jobId],
+      );
+    } else {
+      await this.pool.query(
+        `
+        UPDATE reminder_jobs
+        SET status = 'completed',
+            completed_at = $1,
+            updated_at = $1
+        WHERE card_id = $2
+          AND kind IN ('review', 'manual_now')
+          AND status = 'awaiting_action'
+      `,
+        [completedAt, input.cardId],
+      );
+    }
+    const card = await this.getCardById(input.cardId);
+    await this.createReminderJob({
+      cardId: card.id,
+      userId: card.userId,
+      kind: 'review',
+      dueAt: input.nextReviewAt,
+      source: 'review_result',
+    });
   }
 
   async rescheduleCard(cardId: string, nextReviewAt: string): Promise<void> {
@@ -473,6 +1073,14 @@ export class CardStore {
     `,
       [nextReviewAt, new Date().toISOString(), cardId],
     );
+    const card = await this.getCardById(cardId);
+    await this.createReminderJob({
+      cardId: card.id,
+      userId: card.userId,
+      kind: 'review',
+      dueAt: nextReviewAt,
+      source: 'reschedule',
+    });
   }
 
   async recordNotification(input: RecordNotificationInput): Promise<void> {
@@ -486,6 +1094,18 @@ export class CardStore {
     `,
       [input.sentAt, input.reason, input.messageId, input.cardId],
     );
+    if (input.jobId) {
+      await this.pool.query(
+        `
+        UPDATE reminder_jobs
+        SET sent_at = $1,
+            delivery_message_id = $2,
+            updated_at = $1
+        WHERE id = $3
+      `,
+        [input.sentAt, input.messageId, input.jobId],
+      );
+    }
   }
 
   async setBaseChannelMessage(cardId: string, messageId: number | null): Promise<void> {
@@ -500,6 +1120,7 @@ export class CardStore {
   }
 
   async clearAwaitingGrade(cardId: string): Promise<void> {
+    const now = new Date().toISOString();
     await this.pool.query(
       `
       UPDATE cards
@@ -509,8 +1130,21 @@ export class CardStore {
           awaiting_grade_since = NULL,
           updated_at = $1
       WHERE id = $2
+        AND status = 'awaiting_grade'
     `,
-      [new Date().toISOString(), cardId],
+      [now, cardId],
+    );
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'cancelled',
+          completed_at = $1,
+          updated_at = $1
+      WHERE card_id = $2
+        AND kind IN ('review', 'manual_now')
+        AND status = 'awaiting_action'
+    `,
+      [now, cardId],
     );
   }
 
@@ -538,9 +1172,18 @@ export class CardStore {
     `,
       [isoDate, cardId],
     );
+    const card = await this.getCardById(cardId);
+    await this.createReminderJob({
+      cardId: card.id,
+      userId: card.userId,
+      kind: 'review',
+      dueAt: isoDate,
+      source: 'override',
+    });
   }
 
   async updateStatus(cardId: string, status: CardStatus): Promise<void> {
+    const now = new Date().toISOString();
     await this.pool.query(
       `
       UPDATE cards
@@ -548,8 +1191,47 @@ export class CardStore {
           updated_at = $2
       WHERE id = $3
     `,
-      [status, new Date().toISOString(), cardId],
+      [status, now, cardId],
     );
+
+    if (status === 'archived' || status === 'pending') {
+      await this.pool.query(
+        `
+        UPDATE cards
+        SET pending_channel_id = NULL,
+            pending_channel_message_id = NULL,
+            awaiting_grade_since = NULL,
+            updated_at = $1
+        WHERE id = $2
+      `,
+        [now, cardId],
+      );
+      await this.pool.query(
+        `
+        UPDATE reminder_jobs
+        SET status = 'cancelled',
+            completed_at = $1,
+            updated_at = $1
+        WHERE card_id = $2
+          AND status IN ('pending', 'sending', 'awaiting_action')
+      `,
+        [now, cardId],
+      );
+      return;
+    }
+
+    if (status === 'learning') {
+      const card = await this.getCardById(cardId);
+      if (card.nextReviewAt) {
+        await this.createReminderJob({
+          cardId: card.id,
+          userId: card.userId,
+          kind: 'review',
+          dueAt: card.nextReviewAt,
+          source: 'status_learning',
+        });
+      }
+    }
   }
 
   async logUnrecognizedSchedule(userId: string, input: string): Promise<void> {

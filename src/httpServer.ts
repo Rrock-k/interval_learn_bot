@@ -12,7 +12,7 @@ import express, {
 import cookieParser from 'cookie-parser';
 import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
-import { CardStatus, CardStore } from './db';
+import { CardStatus, CardStore, UserReminderSettings } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import { ReviewScheduler } from './reviewScheduler';
@@ -27,7 +27,8 @@ const allowedStatuses: CardStatus[] = ['pending', 'learning', 'awaiting_grade', 
 const parseLimit = (value: unknown, fallback: number) => {
   if (typeof value !== 'string') return fallback;
   const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(500, Math.max(1, parsed));
 };
 
 const parseMinutes = (value: unknown, fallback: number) => {
@@ -46,6 +47,35 @@ const parseMinutes = (value: unknown, fallback: number) => {
 const isIsoDate = (value: unknown): value is string => {
   if (typeof value !== 'string') return false;
   return !Number.isNaN(Date.parse(value));
+};
+
+const isValidTimezone = (value: string) => {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const parseReminderSettings = (body: unknown): UserReminderSettings | null => {
+  if (!body || typeof body !== 'object') return null;
+  const input = body as Record<string, unknown>;
+  const timezone = typeof input.timezone === 'string' ? input.timezone.trim() : '';
+  const activeHoursStart = Number(input.activeHoursStart);
+  const activeHoursEnd = Number(input.activeHoursEnd);
+  const minGapMinutes = Number(input.minGapMinutes);
+  if (!timezone || !isValidTimezone(timezone)) return null;
+  if (!Number.isInteger(activeHoursStart) || activeHoursStart < 0 || activeHoursStart > 1439) return null;
+  if (!Number.isInteger(activeHoursEnd) || activeHoursEnd < 1 || activeHoursEnd > 1440) return null;
+  if (activeHoursStart >= activeHoursEnd) return null;
+  if (!Number.isInteger(minGapMinutes) || minGapMinutes < 1 || minGapMinutes > 360) return null;
+  return {
+    timezone,
+    activeHoursStart,
+    activeHoursEnd,
+    minGapMinutes,
+  };
 };
 
 export const createHttpServer = (
@@ -233,8 +263,9 @@ export const createHttpServer = (
     }
     
     try {
-      const allCards = await withDbRetry(() => store.listCards({ status, limit }));
-      const userCards = allCards.filter(card => card.userId === userId);
+      const userCards = await withDbRetry(() =>
+        store.listCardsByUser({ userId, status, limit }),
+      );
       res.json({ data: userCards });
     } catch (error) {
       logger.error('Error loading cards for Mini App', error);
@@ -309,8 +340,9 @@ export const createHttpServer = (
     const userId = (req as any).userId;
     
     try {
-      const allCards = await withDbRetry(() => store.listCards({ limit: 1000 }));
-      const userCards = allCards.filter(card => card.userId === userId);
+      const userCards = await withDbRetry(() =>
+        store.listCardsByUser({ userId, limit: 1000 }),
+      );
       
       const stats = {
         total: userCards.length,
@@ -328,6 +360,37 @@ export const createHttpServer = (
     } catch (error) {
       logger.error('Error loading stats for Mini App', error);
       res.status(500).json({ error: 'Failed to load stats' });
+    }
+  });
+
+  app.get('/api/miniapp/settings/reminders', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+
+    try {
+      const settings = await withDbRetry(() => store.getUserReminderSettings(userId));
+      res.json({ data: settings });
+    } catch (error) {
+      logger.error('Error loading reminder settings for Mini App', error);
+      res.status(500).json({ error: 'Failed to load reminder settings' });
+    }
+  });
+
+  app.post('/api/miniapp/settings/reminders', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const settings = parseReminderSettings(req.body);
+    if (!settings) {
+      res.status(400).json({ error: 'Некорректные настройки напоминаний' });
+      return;
+    }
+
+    try {
+      const updated = await withDbRetry(() =>
+        store.updateUserReminderSettings(userId, settings),
+      );
+      res.json({ ok: true, data: updated });
+    } catch (error) {
+      logger.error('Error updating reminder settings for Mini App', error);
+      res.status(500).json({ error: 'Failed to update reminder settings' });
     }
   });
 
@@ -398,6 +461,58 @@ export const createHttpServer = (
         return;
       }
 
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/miniapp/cards/:id/one-time-reminder', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const cardId = req.params.id;
+    const remindAt = req.body?.remindAt;
+
+    if (!cardId) {
+      res.status(400).json({ error: 'Card ID required' });
+      return;
+    }
+
+    if (!isIsoDate(remindAt)) {
+      res.status(400).json({ error: 'Некорректная дата напоминания' });
+      return;
+    }
+
+    if (new Date(remindAt).getTime() <= Date.now()) {
+      res.status(400).json({ error: 'Дата напоминания должна быть в будущем' });
+      return;
+    }
+
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.userId !== userId) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
+      if (card.status === 'pending') {
+        res.status(409).json({ error: 'Карточка ещё не активирована' });
+        return;
+      }
+      if (card.status === 'archived') {
+        res.status(409).json({ error: 'Карточка архивирована' });
+        return;
+      }
+
+      const job = await withDbRetry(() =>
+        store.createReminderJob({
+          cardId: card.id,
+          userId: card.userId,
+          kind: 'one_time',
+          dueAt: remindAt,
+          source: 'miniapp_one_time',
+        }),
+      );
+      res.json({ ok: true, data: job });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось назначить напоминание';
+      logger.error('Error creating one-time reminder for Mini App', error);
       res.status(500).json({ error: message });
     }
   });

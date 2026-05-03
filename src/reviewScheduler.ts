@@ -1,10 +1,27 @@
-import dayjs from 'dayjs';
 import { Telegraf } from 'telegraf';
-import { CardRecord, CardStore, NotificationReason } from './db';
+import {
+  CardRecord,
+  CardStore,
+  NotificationReason,
+  ReminderJobKind,
+  ReminderJobWithCard,
+} from './db';
 import { config } from './config';
-import { buildReviewKeyboard } from './reviewKeyboards';
+import { buildReminderJobKeyboard } from './reviewKeyboards';
 import { logger } from './logger';
 import { withDbRetry } from './utils/dbRetry';
+
+const reminderTextByKind: Record<ReminderJobKind, string> = {
+  review: '🔔 Время повторить запись',
+  manual_now: '🔔 Время повторить запись',
+  one_time: '🔔 Одноразовое напоминание',
+};
+
+const notificationReasonByKind: Record<ReminderJobKind, NotificationReason> = {
+  review: 'scheduled',
+  manual_now: 'manual_now',
+  one_time: 'one_time',
+};
 
 export class ReviewScheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -24,7 +41,6 @@ export class ReviewScheduler {
       },
       config.scheduler.scanIntervalMs,
     );
-    // моментальный запуск при старте
     this.tick().catch((error) =>
       logger.error('Ошибка при первой проверке карточек', error),
     );
@@ -38,20 +54,36 @@ export class ReviewScheduler {
   }
 
   private async tick() {
-    const dueCards = await withDbRetry(() =>
-      this.store.listDueCards(config.scheduler.batchSize),
+    const orphanDueCards = await withDbRetry(() =>
+      this.store.listDueCardsWithoutActiveReviewJob(config.scheduler.batchSize),
     );
-    for (const card of dueCards) {
-      await this.sendCardToChannel(card, 'scheduled');
+    for (const card of orphanDueCards) {
+      const dueAt = card.nextReviewAt;
+      if (!dueAt) continue;
+      await withDbRetry(() =>
+        this.store.createReminderJob({
+          cardId: card.id,
+          userId: card.userId,
+          kind: 'review',
+          dueAt,
+          source: 'due_reconcile',
+        }),
+      );
     }
 
-    // Auto-grade overdue cards
+    const dueJobs = await withDbRetry(() =>
+      this.store.claimDueReminderJobs(config.scheduler.batchSize),
+    );
+    for (const item of dueJobs) {
+      await this.sendReminderJobToChannel(item);
+    }
+
     await this.checkOverdueGrades();
   }
 
   private async checkOverdueGrades() {
     const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 1); // 24 hours ago
+    cutoffDate.setDate(cutoffDate.getDate() - 1);
     const cutoffIso = cutoffDate.toISOString();
 
     const overdueCards = await withDbRetry(() =>
@@ -62,18 +94,25 @@ export class ReviewScheduler {
       try {
         logger.info(`Re-sending unreviewed card ${card.id} (awaiting since ${card.awaitingGradeSince})`);
 
-        // Mark old message as "не просмотрено"
         if (card.pendingChannelId && card.pendingChannelMessageId) {
           await this.markMessageNotViewed(card);
         }
 
-        // Clear awaiting state so sendCardToChannel can re-send
         await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
         const freshCard = await withDbRetry(() => this.store.getCardById(card.id));
+        const now = new Date().toISOString();
+        const job = await withDbRetry(() =>
+          this.store.createReminderJob({
+            cardId: freshCard.id,
+            userId: freshCard.userId,
+            kind: 'review',
+            dueAt: now,
+            scheduledAt: now,
+            source: 'overdue_retry',
+          }),
+        );
 
-        // Send new reminder immediately
-        await this.sendCardToChannel(freshCard, 'scheduled');
-
+        await this.sendReminderJobToChannel({ job, card: freshCard });
         logger.info(`Re-sent unreviewed card ${card.id}`);
       } catch (error) {
         logger.error(`Failed to re-send card ${card.id}`, error);
@@ -89,49 +128,82 @@ export class ReviewScheduler {
     if (card.status === 'pending') {
       throw new Error('Карточка ещё не активирована');
     }
+    if (card.status === 'archived') {
+      throw new Error('Карточка архивирована');
+    }
     if (card.status === 'awaiting_grade') {
       await this.cleanupPendingMessage(card);
       await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
       card = await withDbRetry(() => this.store.getCardById(cardId));
     }
-    await this.sendCardToChannel(card, 'manual_now');
+
+    const now = new Date().toISOString();
+    const job = await withDbRetry(() =>
+      this.store.createReminderJob({
+        cardId: card.id,
+        userId: card.userId,
+        kind: 'manual_now',
+        dueAt: now,
+        scheduledAt: now,
+        source: 'manual_now',
+      }),
+    );
+    await this.sendReminderJobToChannel({ job, card });
   }
 
-  private async sendCardToChannel(card: CardRecord, reason: NotificationReason) {
+  private async sendReminderJobToChannel(input: ReminderJobWithCard) {
+    let { job, card } = input;
     let targetChatId = card.userId;
     try {
       logger.info(
-        `[ReviewScheduler sendCardToChannel:start] card=${card.id} reason=${reason} status=${card.status} base=${card.baseChannelMessageId ?? 'null'} pending=${card.pendingChannelMessageId ?? 'null'} source=${card.sourceChatId}:${card.sourceMessageId}`,
+        `[ReviewScheduler sendReminderJob:start] job=${job.id} kind=${job.kind} card=${card.id} status=${card.status} base=${card.baseChannelMessageId ?? 'null'} pending=${card.pendingChannelMessageId ?? 'null'} source=${card.sourceChatId}:${card.sourceMessageId}`,
       );
-      if (card.pendingChannelId && card.pendingChannelMessageId) {
+
+      card = await withDbRetry(() => this.store.getCardById(card.id));
+      if (card.status === 'archived') {
+        await withDbRetry(() => this.store.cancelReminderJob(job.id));
+        logger.info(`[ReviewScheduler sendReminderJob:cancel_archived] job=${job.id} card=${card.id}`);
+        return;
+      }
+
+      if (job.status === 'pending') {
+        await withDbRetry(() => this.store.markReminderJobSending(job.id));
+        job = { ...job, status: 'sending' };
+      }
+
+      if (job.kind !== 'one_time' && card.pendingChannelId && card.pendingChannelMessageId) {
         await this.cleanupPendingMessage(card);
         await withDbRetry(() => this.store.clearAwaitingGrade(card.id));
         card = await withDbRetry(() => this.store.getCardById(card.id));
       }
 
-      // Determine target chat ID
       const user = await withDbRetry(() => this.store.getUser(card.userId));
-      targetChatId = user?.notificationChatId || card.userId; // Fallback to user ID (DM)
+      targetChatId = user?.notificationChatId || card.userId;
 
-      const keyboard = buildReviewKeyboard(card.id);
+      const keyboard = buildReminderJobKeyboard(card.id, job.id, job.kind);
       let pendingMessageId: number;
+      let baseMessageId = card.baseChannelMessageId;
       let usedReply = false;
-      const reminderText = '🔔 Время повторить запись';
+      const reminderText = reminderTextByKind[job.kind];
 
       const normalizePreview = (value?: string | null): string | null => {
         const normalized = (value ?? '').trim();
         return normalized === '' ? null : normalized;
       };
+      const isTechnicalPreview = (value: string | null): boolean => {
+        if (!value) return false;
+        return value === '[Фото]' || value === '[Видео]' || value.startsWith('[Фото x') || value.startsWith('[Видео x') || value.startsWith('[Медиа x');
+      };
 
-      const sendReminderWithReply = async (baseMessageId: number) => {
+      const sendReminderWithReply = async (replyBaseMessageId: number) => {
         logger.info(
-          `[ReviewScheduler sendReminderWithReply] card=${card.id} reason=${reason} mode=reply_to_message_id baseMessageId=${baseMessageId} target=${targetChatId}`,
+          `[ReviewScheduler sendReminderWithReply] job=${job.id} card=${card.id} kind=${job.kind} mode=reply_to_message_id baseMessageId=${replyBaseMessageId} target=${targetChatId}`,
         );
         const reminder = await (this.bot.telegram as any).callApi('sendMessage', {
           chat_id: targetChatId,
           text: reminderText,
           reply_markup: keyboard.reply_markup,
-          reply_to_message_id: baseMessageId,
+          reply_to_message_id: replyBaseMessageId,
           allow_sending_without_reply: false,
         });
         const replyToMessage = reminder.reply_to_message as
@@ -143,15 +215,15 @@ export class ReviewScheduler {
             ? null
             : String(replyToMessage.chat.id);
         logger.info(
-          `[ReviewScheduler sendReminderWithReply:result] card=${card.id} reason=${reason} messageId=${reminder.message_id} replyTo=${replyToChatId ?? 'null'}:${replyToMessageId ?? 'null'}`,
+          `[ReviewScheduler sendReminderWithReply:result] job=${job.id} card=${card.id} messageId=${reminder.message_id} replyTo=${replyToChatId ?? 'null'}:${replyToMessageId ?? 'null'}`,
         );
         if (
           !replyToMessage ||
-          replyToMessageId !== baseMessageId ||
+          replyToMessageId !== replyBaseMessageId ||
           replyToChatId !== String(targetChatId)
         ) {
           throw new Error(
-            `reply target mismatch: expected ${targetChatId}:${baseMessageId}, got ${replyToChatId ?? 'null'}:${replyToMessageId ?? 'null'}`,
+            `reply target mismatch: expected ${targetChatId}:${replyBaseMessageId}, got ${replyToChatId ?? 'null'}:${replyToMessageId ?? 'null'}`,
           );
         }
         return reminder.message_id;
@@ -159,7 +231,7 @@ export class ReviewScheduler {
 
       const sendStoredBaseMessage = async (withKeyboard = false) => {
         logger.info(
-          `[ReviewScheduler sendStoredBaseMessage] card=${card.id} reason=${reason} withKeyboard=${withKeyboard} target=${targetChatId} contentType=${card.contentType}`,
+          `[ReviewScheduler sendStoredBaseMessage] job=${job.id} card=${card.id} kind=${job.kind} withKeyboard=${withKeyboard} target=${targetChatId} contentType=${card.contentType}`,
         );
         const replyMarkup = withKeyboard ? { reply_markup: keyboard.reply_markup } : {};
         try {
@@ -171,11 +243,12 @@ export class ReviewScheduler {
           );
           const messageId = copiedMessage.message_id;
           card.baseChannelMessageId = messageId;
+          baseMessageId = messageId;
           await withDbRetry(() =>
             this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
           );
           logger.info(
-            `[ReviewScheduler sendStoredBaseMessage:copied_source] card=${card.id} reason=${reason} source=${card.sourceChatId}:${card.sourceMessageId} messageId=${messageId}`,
+            `[ReviewScheduler sendStoredBaseMessage:copied_source] job=${job.id} card=${card.id} source=${card.sourceChatId}:${card.sourceMessageId} messageId=${messageId}`,
           );
           return messageId;
         } catch (error) {
@@ -184,27 +257,25 @@ export class ReviewScheduler {
             error,
           );
         }
-        const preview =
-          normalizePreview(card.contentPreview) ??
-          (card.contentType === 'photo'
-            ? '[Фото]'
-            : card.contentType === 'video'
-              ? '[Видео]'
-              : 'Карточка без текста');
+        const rawPreview = normalizePreview(card.contentPreview);
+        const preview = rawPreview && !isTechnicalPreview(rawPreview) ? rawPreview : null;
+        const textFallback = preview ?? 'Карточка без текста';
         let messageId: number;
         if (card.contentType === 'photo' && card.contentFileId) {
           try {
             const baseMessage = await this.bot.telegram.sendPhoto(
               targetChatId,
               card.contentFileId,
-              { caption: preview.slice(0, 1024), ...replyMarkup },
+              preview
+                ? { caption: preview.slice(0, 1024), ...replyMarkup }
+                : replyMarkup,
             );
             messageId = baseMessage.message_id;
           } catch (error) {
             logger.warn(`Не удалось отправить фото карточки ${card.id} как базу`, error);
             const baseMessage = await this.bot.telegram.sendMessage(
               targetChatId,
-              preview,
+              textFallback,
               replyMarkup,
             );
             messageId = baseMessage.message_id;
@@ -214,14 +285,16 @@ export class ReviewScheduler {
             const baseMessage = await this.bot.telegram.sendVideo(
               targetChatId,
               card.contentFileId,
-              { caption: preview.slice(0, 1024), ...replyMarkup },
+              preview
+                ? { caption: preview.slice(0, 1024), ...replyMarkup }
+                : replyMarkup,
             );
             messageId = baseMessage.message_id;
           } catch (error) {
             logger.warn(`Не удалось отправить видео карточки ${card.id} как базу`, error);
             const baseMessage = await this.bot.telegram.sendMessage(
               targetChatId,
-              preview,
+              textFallback,
               replyMarkup,
             );
             messageId = baseMessage.message_id;
@@ -229,12 +302,13 @@ export class ReviewScheduler {
         } else {
           const baseMessage = await this.bot.telegram.sendMessage(
             targetChatId,
-            preview,
+            textFallback,
             replyMarkup,
           );
           messageId = baseMessage.message_id;
         }
         card.baseChannelMessageId = messageId;
+        baseMessageId = messageId;
         await withDbRetry(() =>
           this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
         );
@@ -242,25 +316,14 @@ export class ReviewScheduler {
       };
 
       if (!card.baseChannelMessageId) {
-        try {
-          logger.info(
-            `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=no_base_send_full_card`,
-          );
-          pendingMessageId = await sendStoredBaseMessage(true);
-        } catch (error) {
-          logger.warn(
-            `Не удалось отправить полную карточку для карточки ${card.id}, попробую ещё раз из сохранённых данных`,
-            error,
-          );
-          logger.info(
-            `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=no_base_retry_full_card`,
-          );
-          pendingMessageId = await sendStoredBaseMessage(true);
-        }
+        logger.info(
+          `[ReviewScheduler branch] job=${job.id} card=${card.id} kind=${job.kind} branch=no_base_send_full_card`,
+        );
+        pendingMessageId = await sendStoredBaseMessage(true);
       } else {
         try {
           logger.info(
-            `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=reply baseMessageId=${card.baseChannelMessageId}`,
+            `[ReviewScheduler branch] job=${job.id} card=${card.id} kind=${job.kind} branch=reply baseMessageId=${card.baseChannelMessageId}`,
           );
           pendingMessageId = await sendReminderWithReply(card.baseChannelMessageId);
           usedReply = true;
@@ -270,52 +333,78 @@ export class ReviewScheduler {
               `Базовое сообщение ${card.baseChannelMessageId} для карточки ${card.id} удалено, копирую заново`,
             );
             logger.info(
-              `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=missing_reply_target_recreate_full_card`,
+              `[ReviewScheduler branch] job=${job.id} card=${card.id} kind=${job.kind} branch=missing_reply_target_recreate_full_card`,
             );
             await withDbRetry(() => this.store.setBaseChannelMessage(card.id, null));
-            try {
-              pendingMessageId = await sendStoredBaseMessage(true);
-            } catch (error) {
-              logger.warn(
-                `Не удалось восстановить полную карточку для карточки ${card.id}, пробую ещё раз из сохранённых данных`,
-                error,
-              );
-              logger.info(
-                `[ReviewScheduler branch] card=${card.id} reason=${reason} branch=missing_reply_target_retry_full_card`,
-              );
-              pendingMessageId = await sendStoredBaseMessage(true);
-            }
+            pendingMessageId = await sendStoredBaseMessage(true);
           } else {
             throw err;
           }
         }
       }
 
-      await withDbRetry(() =>
-        this.store.markAwaitingGrade({
-          cardId: card.id,
-          channelId: targetChatId,
-          channelMessageId: pendingMessageId,
-          pendingSince: new Date().toISOString(),
-        }),
-      );
+      const sentAt = new Date().toISOString();
+      if (job.kind === 'one_time') {
+        await withDbRetry(() =>
+          this.store.markReminderJobAwaitingAction({
+            jobId: job.id,
+            deliveryChatId: targetChatId,
+            deliveryMessageId: pendingMessageId,
+            sentAt,
+            baseMessageId,
+          }),
+        );
+      } else {
+        await withDbRetry(() =>
+          this.store.markAwaitingGrade({
+            cardId: card.id,
+            jobId: job.id,
+            channelId: targetChatId,
+            channelMessageId: pendingMessageId,
+            pendingSince: sentAt,
+            baseMessageId,
+          }),
+        );
+      }
       await withDbRetry(() =>
         this.store.recordNotification({
           cardId: card.id,
+          jobId: job.id,
           messageId: pendingMessageId,
-          reason,
-          sentAt: new Date().toISOString(),
+          reason: notificationReasonByKind[job.kind],
+          sentAt,
         }),
       );
       logger.info(
-        `Отправлена карточка ${card.id} в канал (${reason})${usedReply ? ' (reply)' : ''}`,
+        `Отправлено напоминание job=${job.id} card=${card.id} kind=${job.kind}${usedReply ? ' (reply)' : ''}`,
       );
     } catch (error) {
-      logger.error(`Не удалось отправить карточку ${card.id}`, error);
+      logger.error(`Не удалось отправить напоминание job=${job.id} card=${card.id}`, error);
+      const errorMessage =
+        error instanceof Error ? error.message : 'неизвестная ошибка';
+      const compactMessage = errorMessage.replace(/\s+/g, ' ').slice(0, 240);
+      await withDbRetry(() => this.store.failReminderJob(job.id, compactMessage));
       try {
-        const errorMessage =
-          error instanceof Error ? error.message : 'неизвестная ошибка';
-        const compactMessage = errorMessage.replace(/\s+/g, ' ').slice(0, 240);
+        const latestCard = await withDbRetry(() => this.store.getCardById(card.id));
+        if (latestCard.status !== 'archived') {
+          const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+          await withDbRetry(() =>
+            this.store.createReminderJob({
+              cardId: latestCard.id,
+              userId: latestCard.userId,
+              kind: job.kind,
+              dueAt: retryAt,
+              scheduledAt: retryAt,
+              source: 'send_retry',
+              snoozedFromJobId: job.id,
+              metadata: job.metadata,
+            }),
+          );
+        }
+      } catch (retryError) {
+        logger.warn(`Не удалось поставить retry для job=${job.id} card=${card.id}`, retryError);
+      }
+      try {
         await this.bot.telegram.sendMessage(
           targetChatId,
           `⚠ Не удалось отправить напоминание по карточке ${card.id}. Ошибка: ${compactMessage}`,
@@ -323,8 +412,6 @@ export class ReviewScheduler {
       } catch (notifyErr) {
         logger.warn(`Не удалось отправить уведомление об ошибке карточки ${card.id}`, notifyErr);
       }
-      const retryAt = dayjs().add(1, 'hour').toISOString();
-      await withDbRetry(() => this.store.rescheduleCard(card.id, retryAt));
     }
   }
 
@@ -411,7 +498,7 @@ export class ReviewScheduler {
       if (typeof candidate === 'string') {
         return candidate;
       }
-        if (candidate && typeof candidate === 'object') {
+      if (candidate && typeof candidate === 'object') {
         const asObject = candidate as {
           description?: unknown;
           message?: unknown;
@@ -430,13 +517,5 @@ export class ReviewScheduler {
       }
     }
     return null;
-  }
-
-  private async deleteMessageSafe(chatId: string | number, messageId: number) {
-    try {
-      await this.bot.telegram.deleteMessage(chatId, messageId);
-    } catch (err) {
-      logger.warn(`Не удалось удалить временное сообщение ${messageId}`, err);
-    }
   }
 }

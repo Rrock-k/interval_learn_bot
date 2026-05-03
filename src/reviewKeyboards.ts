@@ -1,6 +1,6 @@
 import { Markup } from 'telegraf';
 import { config } from './config';
-import { gradeOptions, reviewPresetIntervals } from './spacedRepetition';
+import { reviewPresetIntervals } from './spacedRepetition';
 import {
   SCHEDULE_PRESETS,
   ALL_WEEKDAYS,
@@ -10,6 +10,7 @@ import {
 export const REVIEW_ACTIONS = {
   grade: 'grade',
   adjust: 'adjust',
+  snooze: 'snooze',
   preset: 'preset',
   back: 'review_back',
   archive: 'review_archive',
@@ -25,27 +26,55 @@ export const CARD_ACTIONS = {
   weekdayConfirm: 'wc',
 } as const;
 
+export const buildReminderJobKeyboard = (
+  cardId: string,
+  jobId: string,
+  kind: 'review' | 'one_time' | 'manual_now',
+) => {
+  if (kind === 'one_time') {
+    return Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          '✅ Окей',
+          `${REVIEW_ACTIONS.grade}|${jobId}|ok`,
+        ),
+      ],
+      [Markup.button.callback('⚙️ Настроить карточку', `${REVIEW_ACTIONS.adjust}|${jobId}`)],
+    ]);
+  }
+
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        '✅ Окей',
+        `${REVIEW_ACTIONS.grade}|${jobId}|ok`,
+      ),
+    ],
+    [Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${jobId}`)],
+  ]);
+};
+
 export const buildReviewKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
-    gradeOptions.map((option) =>
-      Markup.button.callback(
-        `${option.emoji} ${option.label}`,
-        `${REVIEW_ACTIONS.grade}|${cardId}|${option.key}`,
-      ),
-    ),
+    [Markup.button.callback('✅ Окей', `${REVIEW_ACTIONS.grade}|${cardId}|ok`)],
     [Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${cardId}`)],
   ]);
 
 const formatPresetLabel = (days: number) => `через ${days}д`;
 
-export const buildAdjustKeyboard = (cardId: string, deepLinkUrl?: string) => {
+export const buildAdjustKeyboard = (
+  subjectId: string,
+  deepLinkUrl?: string,
+  options: { cardId?: string; compact?: boolean } = {},
+) => {
+  const cardId = options.cardId ?? subjectId;
   const maxIntervalDays = Math.max(1, config.maxIntervalDays);
   const presets = reviewPresetIntervals.filter((days) => days <= maxIntervalDays);
   const effectivePresets = presets.length ? presets : [maxIntervalDays];
   const buttons = effectivePresets.map((days) =>
     Markup.button.callback(
       formatPresetLabel(days),
-      `${REVIEW_ACTIONS.preset}|${cardId}|${days}`,
+      `${REVIEW_ACTIONS.preset}|${subjectId}|${days}`,
     ),
   );
 
@@ -53,18 +82,20 @@ export const buildAdjustKeyboard = (cardId: string, deepLinkUrl?: string) => {
     | ReturnType<typeof Markup.button.callback>
     | ReturnType<typeof Markup.button.url>;
   const rows: KeyboardButton[][] = [];
-  for (let i = 0; i < buttons.length; i += 3) {
-    rows.push(buttons.slice(i, i + 3));
+  if (!options.compact) {
+    for (let i = 0; i < buttons.length; i += 3) {
+      rows.push(buttons.slice(i, i + 3));
+    }
+    rows.push([
+      Markup.button.callback('🔄 Изменить расписание', `${REVIEW_ACTIONS.changeSchedule}|${subjectId}`),
+    ]);
   }
-  rows.push([
-    Markup.button.callback('🔄 Изменить расписание', `${REVIEW_ACTIONS.changeSchedule}|${cardId}`),
-  ]);
   if (deepLinkUrl) {
     rows.push([Markup.button.url('📱 Открыть в приложении', deepLinkUrl)]);
   }
   rows.push([
     Markup.button.callback('📦 Архивировать', `${REVIEW_ACTIONS.archive}|${cardId}`),
-    Markup.button.callback('⬅️ Назад', `${REVIEW_ACTIONS.back}|${cardId}`),
+    Markup.button.callback('⬅️ Назад', `${REVIEW_ACTIONS.back}|${subjectId}`),
   ]);
 
   return Markup.inlineKeyboard(rows);

@@ -17,7 +17,9 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "miniapp:build": "vite build --config miniapp-src/vite.config.ts",
-    "miniapp:dev": "vite --config miniapp-src/vite.config.ts --host 127.0.0.1"
+    "miniapp:dev": "vite --config miniapp-src/vite.config.ts --host 127.0.0.1",
+    "recover:photo-captions": "tsx scripts/recover-photo-captions.ts",
+    "recover:truncated-previews": "tsx scripts/recover-truncated-previews.ts"
   },
   "keywords": [],
   "author": "",

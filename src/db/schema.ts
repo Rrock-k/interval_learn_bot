@@ -10,6 +10,10 @@ export const users = pgTable(
     lastName: text('last_name'),
     status: text('status').notNull(), // 'pending' | 'approved' | 'rejected'
     notificationChatId: text('notification_chat_id'),
+    timezone: text('timezone').notNull().default('Asia/Tbilisi'),
+    activeHoursStart: integer('active_hours_start').notNull().default(600),
+    activeHoursEnd: integer('active_hours_end').notNull().default(1320),
+    reminderMinGapMinutes: integer('reminder_min_gap_minutes').notNull().default(30),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
@@ -75,3 +79,39 @@ export const unrecognizedSchedules = pgTable('unrecognized_schedules', {
   input: text('input').notNull(),
   createdAt: text('created_at').notNull(),
 });
+
+export const reminderJobs = pgTable(
+  'reminder_jobs',
+  {
+    id: text('id').primaryKey(),
+    cardId: text('card_id').notNull().references(() => cards.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    source: text('source').notNull(),
+    status: text('status').notNull(),
+    dueAt: text('due_at').notNull(),
+    scheduledAt: text('scheduled_at').notNull(),
+    sentAt: text('sent_at'),
+    completedAt: text('completed_at'),
+    deliveryChatId: text('delivery_chat_id'),
+    deliveryMessageId: integer('delivery_message_id'),
+    baseMessageId: integer('base_message_id'),
+    snoozedFromJobId: text('snoozed_from_job_id'),
+    error: text('error'),
+    metadata: text('metadata'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_reminder_jobs_pending_schedule').on(table.status, table.scheduledAt),
+    index('idx_reminder_jobs_card_status').on(table.cardId, table.status),
+    check(
+      'reminder_jobs_kind_check',
+      sql`${table.kind} IN ('review', 'one_time', 'manual_now')`,
+    ),
+    check(
+      'reminder_jobs_status_check',
+      sql`${table.status} IN ('pending', 'sending', 'awaiting_action', 'completed', 'snoozed', 'cancelled', 'failed')`,
+    ),
+  ],
+);

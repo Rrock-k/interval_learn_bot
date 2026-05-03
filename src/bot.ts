@@ -13,7 +13,7 @@ import {
 } from './spacedRepetition';
 import {
   buildAdjustKeyboard,
-  buildReviewKeyboard,
+  buildReminderJobKeyboard,
   buildSchedulePickerKeyboard,
   buildReminderManagementKeyboard,
   buildWeekdayPickerKeyboard,
@@ -48,6 +48,7 @@ const ACTIONS = {
 // Tracks users awaiting free-text schedule input: userId → { cardId, context }
 interface PendingScheduleInput {
   cardId: string;
+  jobId?: string | null;
   ctx: 'a' | 'r'; // 'a' = adding card, 'r' = review reschedule
   messageId: number; // message to edit after parsing
   chatId: number | string;
@@ -103,7 +104,7 @@ export const parseMessage = (message: Message): ParsedMessageInfo | null => {
     const preview = normalizeContentPreview(message.text);
     return {
       contentType: 'text',
-      preview: preview ? preview.slice(0, 200) : null,
+      preview,
       fileId: null,
       fileUniqueId: null,
     };
@@ -132,7 +133,7 @@ export const parseMessage = (message: Message): ParsedMessageInfo | null => {
     const caption = normalizeContentPreview(message.caption ?? null);
     return {
       contentType: 'photo',
-      preview: caption ? caption.slice(0, 200) : '[Фото]',
+      preview: caption ?? '[Фото]',
       fileId: target.file_id,
       fileUniqueId: target.file_unique_id,
     };
@@ -150,7 +151,7 @@ export const parseMessage = (message: Message): ParsedMessageInfo | null => {
     const caption = normalizeContentPreview(message.caption ?? null);
     return {
       contentType: 'video',
-      preview: caption ? caption.slice(0, 200) : '[Видео]',
+      preview: caption ?? '[Видео]',
       fileId: video.file_id,
       fileUniqueId: typeof video.file_unique_id === 'string' ? video.file_unique_id : video.file_id,
     };
@@ -433,6 +434,57 @@ export const createBot = (store: CardStore) => {
     }
   };
 
+  const getReviewActionContext = async (subjectId: string) => {
+    const jobContext = await withDbRetry(() => store.findAwaitingReminderJob(subjectId));
+    if (jobContext) {
+      return {
+        card: jobContext.card,
+        job: jobContext.job,
+        subjectId: jobContext.job.id,
+      };
+    }
+    const card = await getReviewManagedCard(subjectId);
+    if (!card) {
+      return null;
+    }
+    if (card.status === 'awaiting_grade') {
+      const activeJob = await withDbRetry(() => store.findAwaitingReviewJobByCard(card.id));
+      if (activeJob) {
+        return {
+          card: activeJob.card,
+          job: activeJob.job,
+          subjectId: activeJob.job.id,
+        };
+      }
+    }
+    return { card, job: null, subjectId: card.id };
+  };
+
+  const clearReminderKeyboard = async (
+    ctx: TelegrafContext,
+    job: { deliveryChatId: string | null; deliveryMessageId: number | null },
+  ) => {
+    try {
+      await ctx.editMessageReplyMarkup(undefined);
+      return;
+    } catch (error) {
+      logger.warn('Не удалось убрать клавиатуру текущего напоминания', error);
+    }
+    if (!job.deliveryChatId || !job.deliveryMessageId) {
+      return;
+    }
+    try {
+      await ctx.telegram.editMessageReplyMarkup(
+        job.deliveryChatId,
+        job.deliveryMessageId,
+        undefined,
+        undefined,
+      );
+    } catch (error) {
+      logger.warn('Не удалось убрать клавиатуру доставленного напоминания', error);
+    }
+  };
+
   const restoreCustomScheduleMessage = async ({
     pending,
     text,
@@ -712,6 +764,7 @@ export const createBot = (store: CardStore) => {
             await withDbRetry(() =>
               store.saveReviewResult({
                 cardId: pending.cardId,
+                jobId: pending.jobId ?? null,
                 nextReviewAt,
                 repetition: (card.repetition ?? 0) + 1,
                 reviewedAt: new Date().toISOString(),
@@ -971,8 +1024,8 @@ export const createBot = (store: CardStore) => {
   // "Написать своё" button: custom_sched|ctx|cardId
   bot.action(new RegExp(`^custom_sched\\|(a|r)\\|(.+)$`), async (ctx) => {
     const schedCtx = ctx.match?.[1] as 'a' | 'r' | undefined;
-    const cardId = ctx.match?.[2];
-    if (!cardId || !schedCtx) {
+    const subjectId = ctx.match?.[2];
+    if (!subjectId || !schedCtx) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
@@ -981,9 +1034,21 @@ export const createBot = (store: CardStore) => {
       await ctx.answerCbQuery('Не удалось определить пользователя', { show_alert: true });
       return;
     }
+    let pendingCardId = subjectId;
+    let pendingJobId: string | null = null;
+    if (schedCtx === 'r') {
+      const actionContext = await getReviewActionContext(subjectId);
+      if (!actionContext || actionContext.job?.kind === 'one_time') {
+        await ctx.answerCbQuery('Повтор уже обработан');
+        return;
+      }
+      pendingCardId = actionContext.card.id;
+      pendingJobId = actionContext.job?.id ?? null;
+    }
     const userId = `${fromUserId}`;
     pendingScheduleInputs.set(userId, {
-      cardId,
+      cardId: pendingCardId,
+      jobId: pendingJobId,
       ctx: schedCtx,
       messageId: ctx.callbackQuery?.message?.message_id ?? 0,
       chatId: ctx.chat?.id ?? fromUserId,
@@ -991,7 +1056,7 @@ export const createBot = (store: CardStore) => {
     // Auto-cleanup after TTL
     setTimeout(() => {
       const current = pendingScheduleInputs.get(userId);
-      if (current?.cardId === cardId) pendingScheduleInputs.delete(userId);
+      if (current?.cardId === pendingCardId) pendingScheduleInputs.delete(userId);
     }, SCHEDULE_INPUT_TTL_MS);
 
     try {
@@ -1074,23 +1139,27 @@ export const createBot = (store: CardStore) => {
   });
 
   bot.action(new RegExp(`^${REVIEW_ACTIONS.adjust}\\|(.+)$`), async (ctx) => {
-    const cardId = ctx.match?.[1];
-    if (!cardId) {
+    const subjectId = ctx.match?.[1];
+    if (!subjectId) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await getReviewManagedCard(cardId);
-    if (!card) {
+    const actionContext = await getReviewActionContext(subjectId);
+    if (!actionContext) {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
+    const { card, job } = actionContext;
     try {
       const botUsername = ctx.botInfo?.username;
       const deepLinkUrl = botUsername
-        ? buildMiniAppDeepLink(botUsername, buildMiniAppCardParam(cardId))
+        ? buildMiniAppDeepLink(botUsername, buildMiniAppCardParam(card.id))
         : undefined;
       await ctx.editMessageReplyMarkup(
-        buildAdjustKeyboard(cardId, deepLinkUrl).reply_markup,
+        buildAdjustKeyboard(actionContext.subjectId, deepLinkUrl, {
+          cardId: card.id,
+          compact: job?.kind === 'one_time',
+        }).reply_markup,
       );
       await ctx.answerCbQuery('Выберите интервал');
     } catch (error) {
@@ -1100,24 +1169,36 @@ export const createBot = (store: CardStore) => {
   });
 
   bot.action(new RegExp(`^${REVIEW_ACTIONS.back}\\|(.+)$`), async (ctx) => {
-    const cardId = ctx.match?.[1];
-    if (!cardId) {
+    const subjectId = ctx.match?.[1];
+    if (!subjectId) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await getReviewManagedCard(cardId);
-    if (!card) {
+    const actionContext = await getReviewActionContext(subjectId);
+    if (!actionContext) {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
+    const { card, job } = actionContext;
     try {
-      if (card.status === 'awaiting_grade') {
+      if (job) {
         await ctx.editMessageReplyMarkup(
-          buildReviewKeyboard(cardId).reply_markup,
+          buildReminderJobKeyboard(card.id, job.id, job.kind).reply_markup,
+        );
+      } else if (card.status === 'awaiting_grade') {
+        const currentJob = await withDbRetry(() =>
+          store.findAwaitingReviewJobByCard(card.id),
+        );
+        if (!currentJob) {
+          await ctx.answerCbQuery('Повтор уже обработан');
+          return;
+        }
+        await ctx.editMessageReplyMarkup(
+          buildReminderJobKeyboard(card.id, currentJob.job.id, currentJob.job.kind).reply_markup,
         );
       } else {
         await ctx.editMessageReplyMarkup(
-          buildReminderManagementKeyboard(cardId).reply_markup,
+          buildReminderManagementKeyboard(card.id).reply_markup,
         );
       }
       await ctx.answerCbQuery();
@@ -1167,19 +1248,19 @@ export const createBot = (store: CardStore) => {
 
   // "Change schedule" button in adjust menu → show schedule picker
   bot.action(new RegExp(`^${REVIEW_ACTIONS.changeSchedule}\\|(.+)$`), async (ctx) => {
-    const cardId = ctx.match?.[1];
-    if (!cardId) {
+    const subjectId = ctx.match?.[1];
+    if (!subjectId) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await getReviewManagedCard(cardId);
-    if (!card) {
+    const actionContext = await getReviewActionContext(subjectId);
+    if (!actionContext || actionContext.job?.kind === 'one_time') {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
     try {
       await ctx.editMessageReplyMarkup(
-        buildSchedulePickerKeyboard(cardId, 'r').reply_markup,
+        buildSchedulePickerKeyboard(actionContext.subjectId, 'r').reply_markup,
       );
       await ctx.answerCbQuery('Выберите новое расписание');
     } catch (error) {
@@ -1190,23 +1271,23 @@ export const createBot = (store: CardStore) => {
 
   // Schedule selection during review: rs|cardId|code
   bot.action(new RegExp(`^${REVIEW_ACTIONS.setSchedule}\\|([^|]+)\\|(.+)$`), async (ctx) => {
-    const cardId = ctx.match?.[1];
+    const subjectId = ctx.match?.[1];
     const code = ctx.match?.[2];
-    if (!cardId || !code) {
+    if (!subjectId || !code) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
 
     // "pick" code → show schedule picker (back from weekday picker)
     if (code === 'pick') {
-      const card = await getReviewManagedCard(cardId);
-      if (!card) {
+      const actionContext = await getReviewActionContext(subjectId);
+      if (!actionContext || actionContext.job?.kind === 'one_time') {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
       }
       try {
         await ctx.editMessageReplyMarkup(
-          buildSchedulePickerKeyboard(cardId, 'r').reply_markup,
+          buildSchedulePickerKeyboard(actionContext.subjectId, 'r').reply_markup,
         );
         await ctx.answerCbQuery();
       } catch (error) {
@@ -1216,11 +1297,12 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
-    const card = await getReviewManagedCard(cardId);
-    if (!card) {
+    const actionContext = await getReviewActionContext(subjectId);
+    if (!actionContext || actionContext.job?.kind === 'one_time') {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
+    const { card, job } = actionContext;
 
     try {
       let mode: ReminderMode;
@@ -1232,10 +1314,11 @@ export const createBot = (store: CardStore) => {
         // For SM-2 on reschedule, grade as 'ok' to advance
         const result = computeReview({ ...card, reminderMode: 'sm2', scheduleRule: null }, 'ok');
         nextReviewAt = result.nextReviewAt;
-        await withDbRetry(() => store.updateCardReminderMode(cardId, mode, null));
+        await withDbRetry(() => store.updateCardReminderMode(card.id, mode, null));
         await withDbRetry(() =>
           store.saveReviewResult({
-            cardId,
+            cardId: card.id,
+            jobId: job?.id ?? null,
             nextReviewAt,
             repetition: result.repetition,
             reviewedAt: new Date().toISOString(),
@@ -1250,10 +1333,11 @@ export const createBot = (store: CardStore) => {
         mode = 'schedule';
         ruleStr = serializeScheduleRule(preset.rule);
         nextReviewAt = computeNextFromSchedule(preset.rule);
-        await withDbRetry(() => store.updateCardReminderMode(cardId, mode, ruleStr));
+        await withDbRetry(() => store.updateCardReminderMode(card.id, mode, ruleStr));
         await withDbRetry(() =>
           store.saveReviewResult({
-            cardId,
+            cardId: card.id,
+            jobId: job?.id ?? null,
             nextReviewAt,
             repetition: (card.repetition ?? 0) + 1,
             reviewedAt: new Date().toISOString(),
@@ -1276,7 +1360,7 @@ export const createBot = (store: CardStore) => {
 
       try {
         await ctx.editMessageReplyMarkup(
-          buildReminderManagementKeyboard(cardId).reply_markup,
+          buildReminderManagementKeyboard(card.id).reply_markup,
         );
       } catch (_error) {
         // keep user-facing action even if editing fails
@@ -1294,20 +1378,20 @@ export const createBot = (store: CardStore) => {
 
   // Weekday toggle during review: rt|cardId|selectedDays|toggledDay
   bot.action(new RegExp(`^${REVIEW_ACTIONS.weekdayToggle}\\|([^|]+)\\|([^|]*)\\|(\\d)$`), async (ctx) => {
-    const cardId = ctx.match?.[1];
+    const subjectId = ctx.match?.[1];
     const selectedStr = ctx.match?.[2] ?? '';
-    if (!cardId) {
+    if (!subjectId) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
-    const card = await getReviewManagedCard(cardId);
-    if (!card) {
+    const actionContext = await getReviewActionContext(subjectId);
+    if (!actionContext || actionContext.job?.kind === 'one_time') {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
     try {
       await ctx.editMessageReplyMarkup(
-        buildWeekdayPickerKeyboard(cardId, 'r', selectedStr).reply_markup,
+        buildWeekdayPickerKeyboard(actionContext.subjectId, 'r', selectedStr).reply_markup,
       );
       await ctx.answerCbQuery();
     } catch (error) {
@@ -1318,9 +1402,9 @@ export const createBot = (store: CardStore) => {
 
   // Weekday confirm during review: rc|cardId|selectedDays
   bot.action(new RegExp(`^${REVIEW_ACTIONS.weekdayConfirm}\\|([^|]+)\\|([\\d,]+)$`), async (ctx) => {
-    const cardId = ctx.match?.[1];
+    const subjectId = ctx.match?.[1];
     const daysStr = ctx.match?.[2];
-    if (!cardId || !daysStr) {
+    if (!subjectId || !daysStr) {
       await ctx.answerCbQuery('Некорректное действие');
       return;
     }
@@ -1330,21 +1414,23 @@ export const createBot = (store: CardStore) => {
       return;
     }
 
-    const card = await getReviewManagedCard(cardId);
-    if (!card) {
+    const actionContext = await getReviewActionContext(subjectId);
+    if (!actionContext || actionContext.job?.kind === 'one_time') {
       await ctx.answerCbQuery('Повтор уже обработан');
       return;
     }
+    const { card, job } = actionContext;
 
     try {
       const rule = { type: 'weekdays' as const, days };
       const ruleStr = serializeScheduleRule(rule);
       const nextReviewAt = computeNextFromSchedule(rule);
 
-      await withDbRetry(() => store.updateCardReminderMode(cardId, 'schedule', ruleStr));
+      await withDbRetry(() => store.updateCardReminderMode(card.id, 'schedule', ruleStr));
       await withDbRetry(() =>
         store.saveReviewResult({
-          cardId,
+          cardId: card.id,
+          jobId: job?.id ?? null,
           nextReviewAt,
           repetition: (card.repetition ?? 0) + 1,
           reviewedAt: new Date().toISOString(),
@@ -1366,7 +1452,7 @@ export const createBot = (store: CardStore) => {
 
       try {
         await ctx.editMessageReplyMarkup(
-          buildReminderManagementKeyboard(cardId).reply_markup,
+          buildReminderManagementKeyboard(card.id).reply_markup,
         );
       } catch (_error) {
         // keep user-facing action even if editing fails
@@ -1384,23 +1470,25 @@ export const createBot = (store: CardStore) => {
   bot.action(
     new RegExp(`^${REVIEW_ACTIONS.preset}\\|([^|]+)\\|(\\d+)$`),
     async (ctx) => {
-      const cardId = ctx.match?.[1];
+      const subjectId = ctx.match?.[1];
       const daysRaw = ctx.match?.[2];
       const days = daysRaw ? Number(daysRaw) : Number.NaN;
-      if (!cardId || !Number.isFinite(days)) {
+      if (!subjectId || !Number.isFinite(days)) {
         await ctx.answerCbQuery('Некорректное действие');
         return;
       }
-      const card = await getReviewManagedCard(cardId);
-      if (!card) {
+      const actionContext = await getReviewActionContext(subjectId);
+      if (!actionContext || actionContext.job?.kind === 'one_time') {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
       }
+      const { card, job } = actionContext;
       try {
         const result = computeReviewWithInterval(days);
         await withDbRetry(() =>
           store.saveReviewResult({
-            cardId,
+            cardId: card.id,
+            jobId: job?.id ?? null,
             nextReviewAt: result.nextReviewAt,
             repetition: result.repetition,
             reviewedAt: new Date().toISOString(),
@@ -1423,7 +1511,7 @@ export const createBot = (store: CardStore) => {
         }
         try {
           await ctx.editMessageReplyMarkup(
-            buildReminderManagementKeyboard(cardId).reply_markup,
+            buildReminderManagementKeyboard(card.id).reply_markup,
           );
         } catch (_error) {
           // keep user-facing action even if editing fails
@@ -1443,45 +1531,49 @@ export const createBot = (store: CardStore) => {
   bot.action(
     new RegExp(`^${REVIEW_ACTIONS.grade}\\|([^|]+)\\|(again|ok)$`),
     async (ctx) => {
-      const cardId = ctx.match?.[1];
+      const jobId = ctx.match?.[1];
       const grade = ctx.match?.[2] as GradeKey | undefined;
-      if (!cardId || !grade) {
+      if (!jobId || !grade) {
         await ctx.answerCbQuery('Некорректное действие');
         return;
       }
-      const card = await withDbRetry(() => store.findAwaitingCard(cardId));
-      if (!card) {
+      if (grade === 'again') {
+        await ctx.answerCbQuery('Кнопка «Снова» больше не используется. Откройте «Настроить».', {
+          show_alert: true,
+        });
+        return;
+      }
+      let found = await withDbRetry(() => store.findAwaitingReminderJob(jobId));
+      if (!found) {
+        found = await withDbRetry(() => store.findAwaitingReviewJobByCard(jobId));
+      }
+      if (!found) {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
       }
+      const { job, card } = found;
       try {
+        if (job.kind === 'one_time') {
+          await withDbRetry(() => store.completeReminderJob(job.id));
+          await clearReminderKeyboard(ctx, job);
+          await ctx.answerCbQuery('Готово');
+          return;
+        }
+
         const result = computeReview(card, grade);
         await withDbRetry(() =>
           store.saveReviewResult({
-            cardId,
+            cardId: card.id,
+            jobId: job.id,
             nextReviewAt: result.nextReviewAt,
             repetition: result.repetition,
             reviewedAt: new Date().toISOString(),
           }),
         );
-        if (card.pendingChannelId && card.pendingChannelMessageId) {
-          try {
-            await ctx.telegram.editMessageReplyMarkup(
-              card.pendingChannelId,
-              card.pendingChannelMessageId,
-              undefined,
-              undefined,
-            );
-          } catch (editError) {
-            logger.warn(
-              `Не удалось обновить сообщение канала для карточки ${card.id}`,
-              editError,
-            );
-          }
-        }
+        await clearReminderKeyboard(ctx, job);
         try {
           await ctx.editMessageReplyMarkup(
-            buildReminderManagementKeyboard(cardId).reply_markup,
+            buildReminderManagementKeyboard(card.id).reply_markup,
           );
         } catch (_error) {
           // keep user-facing action even if editing fails
@@ -1495,6 +1587,22 @@ export const createBot = (store: CardStore) => {
           show_alert: true,
         });
       }
+    },
+  );
+
+  bot.action(
+    new RegExp(`^${REVIEW_ACTIONS.snooze}\\|([^|]+)\\|(\\d+)$`),
+    async (ctx) => {
+      const jobId = ctx.match?.[1];
+      const minutesRaw = ctx.match?.[2];
+      const minutes = minutesRaw ? Number(minutesRaw) : Number.NaN;
+      if (!jobId || !Number.isFinite(minutes)) {
+        await ctx.answerCbQuery('Некорректное действие');
+        return;
+      }
+      await ctx.answerCbQuery('Кнопка отложения скрыта. Используйте «Настроить».', {
+        show_alert: true,
+      });
     },
   );
 
