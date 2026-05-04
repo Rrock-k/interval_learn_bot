@@ -34,30 +34,32 @@ export const buildReminderJobKeyboard = (
   if (kind === 'one_time') {
     return Markup.inlineKeyboard([
       [
+        Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${jobId}`),
         Markup.button.callback(
           '✅ Окей',
           `${REVIEW_ACTIONS.grade}|${jobId}|ok`,
         ),
       ],
-      [Markup.button.callback('⚙️ Настроить карточку', `${REVIEW_ACTIONS.adjust}|${jobId}`)],
     ]);
   }
 
   return Markup.inlineKeyboard([
     [
+      Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${jobId}`),
       Markup.button.callback(
         '✅ Окей',
         `${REVIEW_ACTIONS.grade}|${jobId}|ok`,
       ),
     ],
-    [Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${jobId}`)],
   ]);
 };
 
 export const buildReviewKeyboard = (cardId: string) =>
   Markup.inlineKeyboard([
-    [Markup.button.callback('✅ Окей', `${REVIEW_ACTIONS.grade}|${cardId}|ok`)],
-    [Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${cardId}`)],
+    [
+      Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${cardId}`),
+      Markup.button.callback('✅ Окей', `${REVIEW_ACTIONS.grade}|${cardId}|ok`),
+    ],
   ]);
 
 const formatPresetLabel = (days: number) => `через ${days}д`;
@@ -82,7 +84,15 @@ export const buildAdjustKeyboard = (
     | ReturnType<typeof Markup.button.callback>
     | ReturnType<typeof Markup.button.url>;
   const rows: KeyboardButton[][] = [];
+  if (options.compact) {
+    rows.push([
+      Markup.button.callback('🔁 Снова', `${REVIEW_ACTIONS.grade}|${subjectId}|again`),
+    ]);
+  }
   if (!options.compact) {
+    rows.push([
+      Markup.button.callback('🔁 Снова', `${REVIEW_ACTIONS.grade}|${subjectId}|again`),
+    ]);
     for (let i = 0; i < buttons.length; i += 3) {
       rows.push(buttons.slice(i, i + 3));
     }

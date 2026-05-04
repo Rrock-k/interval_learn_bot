@@ -1537,12 +1537,6 @@ export const createBot = (store: CardStore) => {
         await ctx.answerCbQuery('Некорректное действие');
         return;
       }
-      if (grade === 'again') {
-        await ctx.answerCbQuery('Кнопка «Снова» больше не используется. Откройте «Настроить».', {
-          show_alert: true,
-        });
-        return;
-      }
       let found = await withDbRetry(() => store.findAwaitingReminderJob(jobId));
       if (!found) {
         found = await withDbRetry(() => store.findAwaitingReviewJobByCard(jobId));
@@ -1554,6 +1548,12 @@ export const createBot = (store: CardStore) => {
       const { job, card } = found;
       try {
         if (job.kind === 'one_time') {
+          if (grade === 'again') {
+            await withDbRetry(() => store.snoozeReminderJob(job.id, 60));
+            await clearReminderKeyboard(ctx, job);
+            await ctx.answerCbQuery('Отложено на час');
+            return;
+          }
           await withDbRetry(() => store.completeReminderJob(job.id));
           await clearReminderKeyboard(ctx, job);
           await ctx.answerCbQuery('Готово');
