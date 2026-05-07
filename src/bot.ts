@@ -1541,6 +1541,56 @@ export const createBot = (store: CardStore) => {
       if (!found) {
         found = await withDbRetry(() => store.findAwaitingReviewJobByCard(jobId));
       }
+      if (!found && grade === 'again') {
+        const processedJob = await withDbRetry(() => store.getReminderJobWithCard(jobId));
+        if (processedJob?.job.status === 'completed') {
+          try {
+            if (processedJob.job.kind === 'one_time') {
+              const dueAt = dayjs().add(1, 'hour').toISOString();
+              await withDbRetry(() =>
+                store.createReminderJob({
+                  cardId: processedJob.card.id,
+                  userId: processedJob.card.userId,
+                  kind: 'one_time',
+                  dueAt,
+                  source: 'repeat_after_completed_one_time',
+                }),
+              );
+              await clearReminderKeyboard(ctx, processedJob.job);
+              await ctx.answerCbQuery('Напомню снова через час');
+              return;
+            }
+
+            const result = computeReview(processedJob.card, 'again');
+            await withDbRetry(() =>
+              store.saveReviewResult({
+                cardId: processedJob.card.id,
+                nextReviewAt: result.nextReviewAt,
+                repetition: result.repetition,
+                reviewedAt: new Date().toISOString(),
+              }),
+            );
+            await clearReminderKeyboard(ctx, processedJob.job);
+            try {
+              await ctx.editMessageReplyMarkup(
+                buildReminderManagementKeyboard(processedJob.card.id).reply_markup,
+              );
+            } catch (_error) {
+              // keep user-facing action even if editing fails
+            }
+            await ctx.answerCbQuery(
+              `Готово! Следующее повторение ${formatNextReviewMessage(result.nextReviewAt)}`,
+            );
+            return;
+          } catch (error) {
+            logger.error('Ошибка повторной обработки завершённого напоминания', error);
+            await ctx.answerCbQuery('Не удалось поставить снова (E_AGAIN_DONE)', {
+              show_alert: true,
+            });
+            return;
+          }
+        }
+      }
       if (!found) {
         await ctx.answerCbQuery('Повтор уже обработан');
         return;
