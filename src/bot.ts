@@ -13,6 +13,9 @@ import {
 } from './spacedRepetition';
 import {
   buildAdjustKeyboard,
+  buildOneTimeCalendarKeyboard,
+  buildOneTimePickerKeyboard,
+  buildOneTimeTimeKeyboard,
   buildReminderJobKeyboard,
   buildSchedulePickerKeyboard,
   buildReminderManagementKeyboard,
@@ -30,6 +33,11 @@ import {
   computeNextFromSchedule,
   parseNaturalSchedule,
 } from './schedule';
+import {
+  computeOneTimeReminderAt,
+  parseOneTimeReminderText,
+} from './oneTimeReminder';
+import type { OneTimePreset } from './oneTimeReminder';
 
 type TelegrafContext = Context<Update>;
 type ReplyFn = (text: string, extra?: Parameters<TelegrafContext['reply']>[1]) => Promise<unknown>;
@@ -38,6 +46,7 @@ const ACTIONS = {
   confirm: 'confirm',
   cancel: 'cancel',
   chooseReminder: 'choose_reminder',
+  chooseOneTime: 'choose_one_time',
   setReminder: 'set_reminder',
   backReminder: 'back_reminder',
   customSchedule: 'custom_sched',
@@ -55,6 +64,13 @@ interface PendingScheduleInput {
 }
 const pendingScheduleInputs = new Map<string, PendingScheduleInput>();
 const SCHEDULE_INPUT_TTL_MS = 5 * 60_000;
+
+interface PendingOneTimeInput {
+  cardId: string;
+  messageId: number;
+  chatId: number | string;
+}
+const pendingOneTimeInputs = new Map<string, PendingOneTimeInput>();
 
 // Tracks the most recent pending card per user (for implicit schedule input)
 const recentPendingCards = new Map<string, string>(); // userId → cardId
@@ -260,6 +276,7 @@ const buildAddKeyboard = (cardId: string) =>
         `${ACTIONS.chooseReminder}|${cardId}`,
       ),
     ],
+    [Markup.button.callback('Одноразово', `${ACTIONS.chooseOneTime}|${cardId}`)],
     [Markup.button.callback('Отмена', `${ACTIONS.cancel}|${cardId}`)],
   ]);
 
@@ -319,6 +336,29 @@ const formatNextReviewMessage = (isoDate: string) => {
   }
   const diffDays = next.diff(dayjs(), 'day');
   return `через ~${Math.max(1, diffDays)} д`;
+};
+
+const setOneTimeReminderForPendingCard = async (
+  store: CardStore,
+  cardId: string,
+  remindAt: string,
+) => {
+  const card = await withDbRetry(() => store.getCardById(cardId));
+  if (card.status !== 'pending') {
+    throw new Error('Эта карточка уже обработана');
+  }
+  await withDbRetry(() => store.updateStatus(cardId, 'learning'));
+  await withDbRetry(() =>
+    store.createReminderJob({
+      cardId: card.id,
+      userId: card.userId,
+      kind: 'one_time',
+      dueAt: remindAt,
+      source: 'telegram_add_one_time',
+    }),
+  );
+  recentPendingCards.delete(card.userId);
+  return card;
 };
 
 const buildAddedMessage = (mode: ReminderMode, scheduleRule: string | null) => {
@@ -684,6 +724,42 @@ export const createBot = (store: CardStore) => {
 
     // Check if user is providing free-text schedule input
     if ('text' in ctx.message) {
+      const pendingOneTime = pendingOneTimeInputs.get(`${userId}`);
+      if (pendingOneTime) {
+        pendingOneTimeInputs.delete(`${userId}`);
+        const remindAt = parseOneTimeReminderText(ctx.message.text);
+        if (!remindAt) {
+          await ctx.reply(
+            'Не удалось распознать время. Примеры: «через 3 дня», «через 2 недели», «завтра в 10», «25.05 18:30».',
+            { reply_parameters: { message_id: ctx.message.message_id } },
+          );
+          pendingOneTimeInputs.set(`${userId}`, pendingOneTime);
+          return;
+        }
+        try {
+          await setOneTimeReminderForPendingCard(store, pendingOneTime.cardId, remindAt);
+          const text = `✅ Одноразовое напоминание назначено\nНапомню ${formatNextReviewMessage(remindAt)}`;
+          try {
+            await bot.telegram.editMessageText(
+              pendingOneTime.chatId,
+              pendingOneTime.messageId,
+              undefined,
+              text,
+            );
+          } catch (error) {
+            logger.warn('Не удалось обновить сообщение после ввода одноразового времени', error);
+            await ctx.reply(text, {
+              reply_parameters: { message_id: ctx.message.message_id },
+            });
+          }
+          return;
+        } catch (error) {
+          logger.error('Ошибка применения одноразового времени', error);
+          await ctx.reply('Не удалось назначить одноразовое напоминание. Попробуйте ещё раз.');
+          return;
+        }
+      }
+
       // Implicit: user has a pending card and typed a schedule-like text
       const recentCardId = recentPendingCards.get(`${userId}`);
       if (recentCardId) {
@@ -892,6 +968,170 @@ export const createBot = (store: CardStore) => {
       logger.error('Не удалось вернуть основную клавиатуру', error);
       await ctx.answerCbQuery('Ошибка (E_REMINDER_BACK)', { show_alert: true });
     }
+  });
+
+  bot.action(new RegExp(`^${ACTIONS.chooseOneTime}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      await ctx.editMessageReplyMarkup(
+        buildOneTimePickerKeyboard(cardId).reply_markup,
+      );
+      await ctx.answerCbQuery('Выберите время');
+    } catch (error) {
+      logger.error('Не удалось открыть одноразовое напоминание', error);
+      await ctx.answerCbQuery('Ошибка (E_ONE_TIME_OPEN)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.setOneTime}\\|([^|]+)\\|(hour|evening|morning)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const preset = ctx.match?.[2] as OneTimePreset | undefined;
+    if (!cardId || !preset) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const remindAt = computeOneTimeReminderAt(preset);
+      await setOneTimeReminderForPendingCard(store, cardId, remindAt);
+      await ctx.answerCbQuery(`Напомню ${formatNextReviewMessage(remindAt)}`);
+      try {
+        await ctx.editMessageText(
+          `✅ Одноразовое напоминание назначено\nНапомню ${formatNextReviewMessage(remindAt)}`,
+        );
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение одноразового напоминания', error);
+      }
+    } catch (error) {
+      logger.error('Не удалось назначить одноразовое напоминание', error);
+      await ctx.answerCbQuery('Ошибка (E_ONE_TIME_SET)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.openOneTimeCalendar}\\|([^|]+)\\|(\\d{4}-\\d{2})$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const month = ctx.match?.[2];
+    if (!cardId || !month) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      await ctx.editMessageReplyMarkup(
+        buildOneTimeCalendarKeyboard(cardId, month).reply_markup,
+      );
+      await ctx.answerCbQuery('Выберите дату');
+    } catch (error) {
+      logger.error('Не удалось открыть календарь одноразового напоминания', error);
+      await ctx.answerCbQuery('Ошибка (E_ONE_TIME_CAL)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.pickOneTimeDate}\\|([^|]+)\\|(\\d{4}-\\d{2}-\\d{2})$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const date = ctx.match?.[2];
+    if (!cardId || !date) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      await ctx.editMessageReplyMarkup(
+        buildOneTimeTimeKeyboard(cardId, date).reply_markup,
+      );
+      await ctx.answerCbQuery('Выберите время');
+    } catch (error) {
+      logger.error('Не удалось открыть время одноразового напоминания', error);
+      await ctx.answerCbQuery('Ошибка (E_ONE_TIME_DATE)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.setOneTimeDateTime}\\|([^|]+)\\|(\\d{4}-\\d{2}-\\d{2})\\|(\\d{4})$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    const date = ctx.match?.[2];
+    const time = ctx.match?.[3];
+    if (!cardId || !date || !time) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const remindAt = dayjs(`${date}T${time.slice(0, 2)}:${time.slice(2, 4)}:00`);
+    if (!remindAt.isValid() || !remindAt.isAfter(dayjs())) {
+      await ctx.answerCbQuery('Выберите будущее время', { show_alert: true });
+      return;
+    }
+    try {
+      await setOneTimeReminderForPendingCard(store, cardId, remindAt.toISOString());
+      await ctx.answerCbQuery(`Напомню ${formatNextReviewMessage(remindAt.toISOString())}`);
+      try {
+        await ctx.editMessageText(
+          `✅ Одноразовое напоминание назначено\nНапомню ${formatNextReviewMessage(remindAt.toISOString())}`,
+        );
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение одноразового напоминания', error);
+      }
+    } catch (error) {
+      logger.error('Не удалось назначить дату одноразового напоминания', error);
+      await ctx.answerCbQuery('Ошибка (E_ONE_TIME_DATETIME)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.customOneTime}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    const fromUserId = ctx.from?.id;
+    if (!fromUserId) {
+      await ctx.answerCbQuery('Не удалось определить пользователя', { show_alert: true });
+      return;
+    }
+    try {
+      const card = await withDbRetry(() => store.getCardById(cardId));
+      if (card.status !== 'pending') {
+        await ctx.answerCbQuery('Эта карточка уже обработана');
+        return;
+      }
+      pendingOneTimeInputs.set(`${fromUserId}`, {
+        cardId,
+        messageId: ctx.callbackQuery?.message?.message_id ?? 0,
+        chatId: ctx.chat?.id ?? fromUserId,
+      });
+      setTimeout(() => {
+        const current = pendingOneTimeInputs.get(`${fromUserId}`);
+        if (current?.cardId === cardId) pendingOneTimeInputs.delete(`${fromUserId}`);
+      }, SCHEDULE_INPUT_TTL_MS);
+      await ctx.editMessageText(
+        'Напишите когда напомнить, например:\n'
+        + '• «через 3 дня», «через 2 недели»\n'
+        + '• «через час», «через 30 минут»\n'
+        + '• «завтра в 10», «25.05 18:30»',
+      );
+      await ctx.answerCbQuery();
+    } catch (error) {
+      logger.error('Не удалось открыть ввод одноразового времени', error);
+      await ctx.answerCbQuery('Ошибка (E_ONE_TIME_CUSTOM)', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.noop}\\|.+$`), async (ctx) => {
+    await ctx.answerCbQuery();
   });
 
   // Schedule selection during card creation: ss|cardId|code
@@ -1221,29 +1461,39 @@ export const createBot = (store: CardStore) => {
     }
     try {
       await withDbRetry(() => store.updateStatus(cardId, 'archived'));
-      if (card.pendingChannelId && card.pendingChannelMessageId) {
-        try {
-          await ctx.telegram.editMessageReplyMarkup(
-            card.pendingChannelId,
-            card.pendingChannelMessageId,
-            undefined,
-            undefined,
-          );
-        } catch (editError) {
-          logger.warn(
-            `Не удалось убрать кнопки канала для карточки ${card.id}`,
-            editError,
-          );
-        }
-      }
-      await ctx.editMessageReplyMarkup(undefined);
-      await ctx.answerCbQuery('Карточка архивирована');
     } catch (error) {
       logger.error('Ошибка архивации карточки', error);
       await ctx.answerCbQuery('Не удалось архивировать (E_ARCHIVE)', {
         show_alert: true,
       });
+      return;
     }
+
+    if (card.pendingChannelId && card.pendingChannelMessageId) {
+      try {
+        await ctx.telegram.editMessageReplyMarkup(
+          card.pendingChannelId,
+          card.pendingChannelMessageId,
+          undefined,
+          undefined,
+        );
+      } catch (editError) {
+        logger.warn(
+          `Не удалось убрать кнопки канала для карточки ${card.id}`,
+          editError,
+        );
+      }
+    }
+
+    try {
+      await ctx.editMessageReplyMarkup(undefined);
+    } catch (editError) {
+      logger.warn(
+        `Не удалось убрать кнопки текущего сообщения для карточки ${card.id}`,
+        editError,
+      );
+    }
+    await ctx.answerCbQuery('Карточка архивирована');
   });
 
   // "Change schedule" button in adjust menu → show schedule picker

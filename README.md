@@ -69,6 +69,18 @@ npm start
 
 Полный пошаговый гид со скриншотами CLI-команд находится в `docs/railway-deploy.md`. Там же описаны нюансы интеграции с Railway Postgres и сценарии обновлений.
 
+## Логи
+
+Продакшн-логи смотрятся в Railway: **Project → Service → Deployments → Logs** для конкретного деплоя или через CLI из связанного репозитория:
+
+```bash
+railway login
+railway link
+railway logs
+```
+
+Локально логи идут в stdout процесса `npm run dev` / `npm start`.
+
 ## Скрипты
 - `npm run dev` — запуск в режиме разработки (hot reload).
 - `npm run lint` — проверка типов TypeScript.

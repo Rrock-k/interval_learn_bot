@@ -471,7 +471,11 @@ export class CardStore {
         ],
       );
     }
-    const scheduledAt = input.scheduledAt ?? (await this.planScheduledAt(input.userId, input.dueAt));
+    const scheduledAt =
+      input.scheduledAt ??
+      (input.kind === 'one_time'
+        ? input.dueAt
+        : await this.planScheduledAt(input.userId, input.dueAt));
     const { rows } = await this.pool.query(
       `
       INSERT INTO reminder_jobs (

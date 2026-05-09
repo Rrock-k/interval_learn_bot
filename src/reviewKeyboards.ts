@@ -1,4 +1,5 @@
 import { Markup } from 'telegraf';
+import dayjs from 'dayjs';
 import { config } from './config';
 import { reviewPresetIntervals } from './spacedRepetition';
 import {
@@ -22,6 +23,12 @@ export const REVIEW_ACTIONS = {
 
 export const CARD_ACTIONS = {
   setSchedule: 'ss',
+  setOneTime: 'ot',
+  openOneTimeCalendar: 'oc',
+  pickOneTimeDate: 'od',
+  setOneTimeDateTime: 'ott',
+  customOneTime: 'ou',
+  noop: 'noop',
   weekdayToggle: 'wt',
   weekdayConfirm: 'wc',
 } as const;
@@ -59,6 +66,95 @@ export const buildReviewKeyboard = (cardId: string) =>
     [
       Markup.button.callback('⚙️ Настроить', `${REVIEW_ACTIONS.adjust}|${cardId}`),
       Markup.button.callback('✅ Окей', `${REVIEW_ACTIONS.grade}|${cardId}|ok`),
+    ],
+  ]);
+
+export const buildOneTimePickerKeyboard = (cardId: string) =>
+  Markup.inlineKeyboard([
+    [
+      Markup.button.callback('Через час', `${CARD_ACTIONS.setOneTime}|${cardId}|hour`),
+    ],
+    [
+      Markup.button.callback('Вечером', `${CARD_ACTIONS.setOneTime}|${cardId}|evening`),
+      Markup.button.callback('Завтра утром', `${CARD_ACTIONS.setOneTime}|${cardId}|morning`),
+    ],
+    [
+      Markup.button.callback(
+        '📅 Выбрать дату',
+        `${CARD_ACTIONS.openOneTimeCalendar}|${cardId}|${dayjs().format('YYYY-MM')}`,
+      ),
+    ],
+    [
+      Markup.button.callback('✏️ Написать своё', `${CARD_ACTIONS.customOneTime}|${cardId}`),
+    ],
+    [Markup.button.callback('⬅️ Назад', `back_reminder|${cardId}`)],
+  ]);
+
+export const buildOneTimeCalendarKeyboard = (cardId: string, monthValue: string) => {
+  const month = dayjs(`${monthValue}-01`);
+  const safeMonth = month.isValid() ? month : dayjs().startOf('month');
+  const monthStart = safeMonth.startOf('month');
+  const daysInMonth = monthStart.daysInMonth();
+  const startDow = (monthStart.day() + 6) % 7;
+  const rows: ReturnType<typeof Markup.button.callback>[][] = [
+    [
+      Markup.button.callback(
+        '‹',
+        `${CARD_ACTIONS.openOneTimeCalendar}|${cardId}|${monthStart.subtract(1, 'month').format('YYYY-MM')}`,
+      ),
+      Markup.button.callback(
+        monthStart.format('MM.YYYY'),
+        `${CARD_ACTIONS.noop}|${cardId}`,
+      ),
+      Markup.button.callback(
+        '›',
+        `${CARD_ACTIONS.openOneTimeCalendar}|${cardId}|${monthStart.add(1, 'month').format('YYYY-MM')}`,
+      ),
+    ],
+    ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label) =>
+      Markup.button.callback(label, `${CARD_ACTIONS.noop}|${cardId}`),
+    ),
+  ];
+  let row: ReturnType<typeof Markup.button.callback>[] = [];
+  for (let i = 0; i < startDow; i += 1) {
+    row.push(Markup.button.callback(' ', `${CARD_ACTIONS.noop}|${cardId}`));
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = monthStart.date(day).format('YYYY-MM-DD');
+    row.push(
+      Markup.button.callback(
+        String(day),
+        `${CARD_ACTIONS.pickOneTimeDate}|${cardId}|${date}`,
+      ),
+    );
+    if (row.length === 7) {
+      rows.push(row);
+      row = [];
+    }
+  }
+  if (row.length) {
+    while (row.length < 7) {
+      row.push(Markup.button.callback(' ', `${CARD_ACTIONS.noop}|${cardId}`));
+    }
+    rows.push(row);
+  }
+  rows.push([Markup.button.callback('⬅️ Назад', `choose_one_time|${cardId}`)]);
+  return Markup.inlineKeyboard(rows);
+};
+
+export const buildOneTimeTimeKeyboard = (cardId: string, date: string) =>
+  Markup.inlineKeyboard([
+    [
+      Markup.button.callback('10:00', `${CARD_ACTIONS.setOneTimeDateTime}|${cardId}|${date}|1000`),
+      Markup.button.callback('14:00', `${CARD_ACTIONS.setOneTimeDateTime}|${cardId}|${date}|1400`),
+      Markup.button.callback('20:00', `${CARD_ACTIONS.setOneTimeDateTime}|${cardId}|${date}|2000`),
+    ],
+    [Markup.button.callback('✏️ Написать своё', `${CARD_ACTIONS.customOneTime}|${cardId}`)],
+    [
+      Markup.button.callback(
+        '⬅️ Назад к календарю',
+        `${CARD_ACTIONS.openOneTimeCalendar}|${cardId}|${date.slice(0, 7)}`,
+      ),
     ],
   ]);
 

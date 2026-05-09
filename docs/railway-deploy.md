@@ -53,7 +53,7 @@ railway variables set INITIAL_REVIEW_MINUTES=20 REVIEW_SCAN_INTERVAL_MS=90000
 - Для контроля доступности используется `GET /healthz`, указанный в `railway.json` как `healthcheckPath`.
 
 ## 5. Проверка и эксплуатация
-1. После успешного деплоя откройте логи Railway и убедитесь, что бот запустился (`Бот запущен...`).
+1. После успешного деплоя откройте **Project → Service → Deployments → Logs** в Railway и убедитесь, что бот запустился (`Бот запущен...`). Через CLI то же самое: `railway link`, затем `railway logs`.
 2. Проверьте, что `https://<service>.up.railway.app/healthz` возвращает `{"ok":true, ...}`.
 3. Перейдите на `https://<service>.up.railway.app/` — появится форма входа, введите `DASHBOARD_SECRET` и убедитесь, что панель грузится.
 4. Убедитесь, что в разделе Postgres → Query можно увидеть таблицу `cards`. Это подтвердит, что миграция прошла успешно.
