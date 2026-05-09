@@ -1,10 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-const { buildMessageLink, getMessageLink } = require('../public/miniapp/linkUtils.js') as {
-  buildMessageLink: (chatId: string | number | null, messageId: string | number | null) => string | null;
-  getMessageLink: (card: Record<string, unknown> | null) => string | null;
-};
+import { buildMessageLink, getMessageLink } from '../miniapp-src/src/linkUtils';
 
 test('buildMessageLink: public chat и канал корректны', () => {
   assert.equal(buildMessageLink('12345', 10), 'tg://openmessage?user_id=12345&message_id=10');

@@ -88,9 +88,9 @@ test('parseMessage: возвращает null на некорректных ти
   assert.equal(parseMessage(withType({ video: 123 as unknown as Record<string, unknown> })), null);
 });
 
-test('parseMessage: обрезает длинный preview до 200 символов', () => {
+test('parseMessage: сохраняет длинный preview без потери текста', () => {
   const parsed = parseMessage(withType({ text: 'a'.repeat(250) }));
-  assert.equal(parsed?.preview?.length, 200);
+  assert.equal(parsed?.preview?.length, 250);
 });
 
 test('parseMediaGroup: пропускает неподдерживаемые сообщения и берет первую валидную карточку', () => {

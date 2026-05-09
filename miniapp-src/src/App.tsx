@@ -35,6 +35,7 @@ import {
   TabsTrigger,
 } from './components/ui';
 import { cn } from './lib/utils';
+import { buildMessageLink, getMessageLink } from './linkUtils';
 
 type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 type ViewName = 'cards' | 'calendar' | 'stats' | 'card-detail' | 'notification-detail';
@@ -305,24 +306,6 @@ async function copyText(value: string) {
     textarea.remove();
     return copied;
   }
-}
-
-function buildMessageLink(chatIdRaw?: string | null, messageIdRaw?: number | null) {
-  if (!chatIdRaw || !messageIdRaw) return null;
-  const chatId = String(chatIdRaw);
-  const messageId = Number(messageIdRaw);
-  if (!Number.isInteger(messageId) || messageId <= 0) return null;
-  if (chatId.startsWith('-100')) return `https://t.me/c/${chatId.slice(4)}/${messageId}`;
-  if (chatId.startsWith('-')) return null;
-  return `tg://openmessage?user_id=${chatId}&message_id=${messageId}`;
-}
-
-function getMessageLink(card: CardRecord) {
-  if (card.status === 'awaiting_grade') {
-    const pendingLink = buildMessageLink(card.pendingChannelId, card.pendingChannelMessageId);
-    if (pendingLink) return pendingLink;
-  }
-  return buildMessageLink(card.sourceChatId, card.sourceMessageId);
 }
 
 export function App() {
