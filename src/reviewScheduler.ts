@@ -234,11 +234,51 @@ export class ReviewScheduler {
           `[ReviewScheduler sendStoredBaseMessage] job=${job.id} card=${card.id} kind=${job.kind} withKeyboard=${withKeyboard} target=${targetChatId} contentType=${card.contentType}`,
         );
         const replyMarkup = withKeyboard ? { reply_markup: keyboard.reply_markup } : {};
+        const sourceIds = (card.sourceMessageIds || [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id));
+        const uniqueSourceIds = Array.from(new Set(sourceIds)).sort((a, b) => a - b);
+        if (uniqueSourceIds.length > 1) {
+          let lastCopiedMessageId: number | null = null;
+          try {
+            const copiedMessages = await this.bot.telegram.copyMessages(
+              targetChatId,
+              card.sourceChatId,
+              uniqueSourceIds,
+            );
+            lastCopiedMessageId =
+              copiedMessages[copiedMessages.length - 1]?.message_id ?? null;
+            if (!lastCopiedMessageId) {
+              throw new Error(`Не удалось скопировать медиагруппу карточки ${card.id}`);
+            }
+            card.baseChannelMessageId = lastCopiedMessageId;
+            baseMessageId = lastCopiedMessageId;
+            await withDbRetry(() =>
+              this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
+            );
+            logger.info(
+              `[ReviewScheduler sendStoredBaseMessage:copied_media_group] job=${job.id} card=${card.id} source=${card.sourceChatId}:${uniqueSourceIds.join(',')} baseMessageId=${lastCopiedMessageId}`,
+            );
+          } catch (error) {
+            logger.warn(
+              `Не удалось скопировать медиагруппу карточки ${card.id}, пересобираю из сохранённых данных`,
+              error,
+            );
+          }
+          if (lastCopiedMessageId) {
+            if (withKeyboard) {
+              return await sendReminderWithReply(lastCopiedMessageId);
+            }
+            return lastCopiedMessageId;
+          }
+        }
+
         try {
+          const sourceMessageId = uniqueSourceIds[0] ?? card.sourceMessageId;
           const copiedMessage = await this.bot.telegram.copyMessage(
             targetChatId,
             card.sourceChatId,
-            card.sourceMessageId,
+            sourceMessageId,
             replyMarkup,
           );
           const messageId = copiedMessage.message_id;
@@ -248,7 +288,7 @@ export class ReviewScheduler {
             this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
           );
           logger.info(
-            `[ReviewScheduler sendStoredBaseMessage:copied_source] job=${job.id} card=${card.id} source=${card.sourceChatId}:${card.sourceMessageId} messageId=${messageId}`,
+            `[ReviewScheduler sendStoredBaseMessage:copied_source] job=${job.id} card=${card.id} source=${card.sourceChatId}:${sourceMessageId} messageId=${messageId}`,
           );
           return messageId;
         } catch (error) {
