@@ -20,6 +20,9 @@
       h1 {
         margin-bottom: 8px;
       }
+      h2 {
+        margin: 32px 0 8px;
+      }
       .controls {
         display: flex;
         gap: 12px;
@@ -121,6 +124,18 @@
         background: #9ea7b133;
         color: #cdd3dc;
       }
+      .status-open {
+        background: #20c99733;
+        color: #9ff2d0;
+      }
+      .status-done {
+        background: #1f7aec33;
+        color: #93c5fd;
+      }
+      .muted {
+        font-size: 12px;
+        color: #87a2c2;
+      }
       #toast {
         position: fixed;
         bottom: 16px;
@@ -176,6 +191,30 @@
       </thead>
       <tbody id="cardsBody"></tbody>
     </table>
+    <h2>Бэклог агента</h2>
+    <div class="controls">
+      <label>
+        Статус
+        <select id="backlogStatusFilter">
+          <option value="" selected>Все</option>
+          <option value="open">open</option>
+          <option value="done">done</option>
+          <option value="archived">archived</option>
+        </select>
+      </label>
+      <button id="refreshBacklogBtn">Обновить бэклог</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Статус</th>
+          <th>Создано</th>
+          <th>Превью</th>
+        </tr>
+      </thead>
+      <tbody id="backlogBody"></tbody>
+    </table>
     <div id="toast"></div>
     <script>
       const statusFilter = document.getElementById('statusFilter');
@@ -183,6 +222,9 @@
       const delayInput = document.getElementById('delayMinutes');
       const refreshBtn = document.getElementById('refreshBtn');
       const cardsBody = document.getElementById('cardsBody');
+      const backlogStatusFilter = document.getElementById('backlogStatusFilter');
+      const refreshBacklogBtn = document.getElementById('refreshBacklogBtn');
+      const backlogBody = document.getElementById('backlogBody');
       const toast = document.getElementById('toast');
 
       const statusLabels = {
@@ -192,6 +234,11 @@
         archived: 'archived',
       };
       const allowedStatusFilters = new Set(Object.keys(statusLabels));
+      const backlogStatusLabels = {
+        open: 'open',
+        done: 'done',
+        archived: 'archived',
+      };
       const urlParams = new URLSearchParams(window.location.search);
       const initialStatus = urlParams.get('status');
       if (initialStatus && allowedStatusFilters.has(initialStatus)) {
@@ -305,6 +352,47 @@
           .join('');
       }
 
+      async function fetchBacklog() {
+        const params = new URLSearchParams();
+        if (backlogStatusFilter.value) params.set('status', backlogStatusFilter.value);
+        params.set('limit', limitSelect.value);
+        const res = await fetch(`/api/backlog?${params.toString()}`);
+        if (!ensureAuthorized(res)) return;
+        if (!res.ok) {
+          showToast('Не удалось загрузить бэклог');
+          return;
+        }
+        const payload = await res.json();
+        renderBacklog(payload.data ?? []);
+      }
+
+      function renderBacklog(items) {
+        if (!items.length) {
+          backlogBody.innerHTML = '<tr><td colspan="4">Нет записей в бэклоге.</td></tr>';
+          return;
+        }
+        backlogBody.innerHTML = items
+          .map(
+            (item) => `
+          <tr>
+            <td>
+              <div>${item.id}</div>
+              <div class="muted">Chat ${item.sourceChatId} • Msg ${item.sourceMessageId}</div>
+            </td>
+            <td>
+              <span class="status-tag status-${item.status}">${backlogStatusLabels[item.status] ?? item.status}</span>
+            </td>
+            <td>${formatDate(item.createdAt)}</td>
+            <td>
+              <div class="preview-text">${htmlEscape(item.contentPreview || '—')}</div>
+              <div class="muted">${htmlEscape(item.contentType || '')}</div>
+            </td>
+          </tr>
+        `,
+          )
+          .join('');
+      }
+
       function persistStatusFilter() {
         const params = new URLSearchParams(window.location.search);
         if (statusFilter.value) {
@@ -409,8 +497,11 @@
       });
       limitSelect.addEventListener('change', fetchCards);
       refreshBtn.addEventListener('click', fetchCards);
+      backlogStatusFilter.addEventListener('change', fetchBacklog);
+      refreshBacklogBtn.addEventListener('click', fetchBacklog);
 
       fetchCards();
+      fetchBacklog();
 
       const redirectToLogin = () => {
         const next = `${window.location.pathname}${window.location.search}`;

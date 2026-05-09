@@ -26,6 +26,8 @@ export const config = {
   initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 60),
   maxIntervalDays: toNumber(process.env.MAX_INTERVAL_DAYS, 45),
   dashboardSecret: requireEnv('DASHBOARD_SECRET'),
+  backlogOwnerUserId: (process.env.BACKLOG_OWNER_USER_ID || '359367655').trim(),
+  agentApiToken: process.env.AGENT_API_TOKEN?.trim() || null,
   scheduler: {
     scanIntervalMs: toNumber(process.env.REVIEW_SCAN_INTERVAL_MS, 60_000),
     batchSize: toNumber(process.env.REVIEW_BATCH_SIZE, 5),

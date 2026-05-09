@@ -73,6 +73,31 @@ export const cards = pgTable(
   ],
 );
 
+export const backlogItems = pgTable(
+  'backlog_items',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull(),
+    sourceChatId: text('source_chat_id').notNull(),
+    sourceMessageId: integer('source_message_id').notNull(),
+    sourceMessageIds: text('source_message_ids'),
+    contentType: text('content_type').notNull(),
+    contentPreview: text('content_preview'),
+    contentFileId: text('content_file_id'),
+    contentFileUniqueId: text('content_file_unique_id'),
+    status: text('status').notNull().default('open'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_backlog_items_status_created').on(table.status, table.createdAt),
+    check(
+      'backlog_items_status_check',
+      sql`${table.status} IN ('open', 'done', 'archived')`,
+    ),
+  ],
+);
+
 export const unrecognizedSchedules = pgTable('unrecognized_schedules', {
   id: serial('id').primaryKey(),
   userId: text('user_id').notNull(),

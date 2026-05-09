@@ -44,6 +44,7 @@ type ReplyFn = (text: string, extra?: Parameters<TelegrafContext['reply']>[1]) =
 
 const ACTIONS = {
   confirm: 'confirm',
+  sendBacklog: 'send_backlog',
   cancel: 'cancel',
   chooseReminder: 'choose_reminder',
   chooseOneTime: 'choose_one_time',
@@ -74,6 +75,9 @@ const pendingOneTimeInputs = new Map<string, PendingOneTimeInput>();
 
 // Tracks the most recent pending card per user (for implicit schedule input)
 const recentPendingCards = new Map<string, string>(); // userId → cardId
+
+const isBacklogOwner = (userId: number | string | undefined) =>
+  userId !== undefined && String(userId) === config.backlogOwnerUserId;
 
 const scheduleModeLabel = (mode: ReminderMode, scheduleRule: string | null): string => {
   if (mode === 'schedule') {
@@ -267,8 +271,8 @@ const extractMediaGroupMessageIds = (messages: Message[]) => {
   return Array.from(unique).sort((a, b) => a - b);
 };
 
-const buildAddKeyboard = (cardId: string) =>
-  Markup.inlineKeyboard([
+const buildAddKeyboard = (cardId: string, canSendBacklog = false) => {
+  const rows = [
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
     [
       Markup.button.callback(
@@ -277,8 +281,15 @@ const buildAddKeyboard = (cardId: string) =>
       ),
     ],
     [Markup.button.callback('Одноразово', `${ACTIONS.chooseOneTime}|${cardId}`)],
-    [Markup.button.callback('Отмена', `${ACTIONS.cancel}|${cardId}`)],
-  ]);
+  ];
+  if (canSendBacklog) {
+    rows.push([
+      Markup.button.callback('В бэклог агента', `${ACTIONS.sendBacklog}|${cardId}`),
+    ]);
+  }
+  rows.push([Markup.button.callback('Отмена', `${ACTIONS.cancel}|${cardId}`)]);
+  return Markup.inlineKeyboard(rows);
+};
 
 const createPendingCardAndPrompt = async ({
   store,
@@ -322,7 +333,7 @@ const createPendingCardAndPrompt = async ({
   await reply(
     'Добавить это в интервальное обучение?',
     {
-      ...buildAddKeyboard(cardId),
+      ...buildAddKeyboard(cardId, isBacklogOwner(userId)),
       reply_parameters: { message_id: sourceMessageId },
     },
   );
@@ -1343,6 +1354,39 @@ export const createBot = (store: CardStore) => {
     } catch (error) {
       logger.error('Не удалось активировать карточку', error);
       await ctx.answerCbQuery('Ошибка при добавлении. Код: E_ACTIVATE', {
+        show_alert: true,
+      });
+    }
+  });
+
+  bot.action(new RegExp(`^${ACTIONS.sendBacklog}\\|(.+)$`), async (ctx) => {
+    const cardId = ctx.match?.[1];
+    if (!cardId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    if (!isBacklogOwner(ctx.from?.id)) {
+      await ctx.answerCbQuery('Недоступно для этого пользователя', {
+        show_alert: true,
+      });
+      return;
+    }
+    try {
+      const item = await withDbRetry(() =>
+        store.createBacklogItemFromPendingCard(cardId, config.backlogOwnerUserId),
+      );
+      if (recentPendingCards.get(item.userId) === cardId) {
+        recentPendingCards.delete(item.userId);
+      }
+      await ctx.answerCbQuery('Отправлено в бэклог агента');
+      try {
+        await ctx.editMessageText('Отправлено в бэклог агента');
+      } catch (error) {
+        logger.warn('Не удалось обновить сообщение', error);
+      }
+    } catch (error) {
+      logger.error('Не удалось отправить в бэклог', error);
+      await ctx.answerCbQuery('Не удалось отправить в бэклог (E_BACKLOG)', {
         show_alert: true,
       });
     }

@@ -8,6 +8,7 @@ import {
 } from './reminderPlanner';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
+export type BacklogItemStatus = 'open' | 'done' | 'archived';
 export type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
 export type ReminderJobKind = 'review' | 'one_time' | 'manual_now';
 export type ReminderJobStatus =
@@ -42,6 +43,21 @@ export interface CardRecord {
   lastNotificationAt: string | null;
   lastNotificationReason: NotificationReason | null;
   lastNotificationMessageId: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BacklogItemRecord {
+  id: string;
+  userId: string;
+  sourceChatId: string;
+  sourceMessageId: number;
+  sourceMessageIds: number[] | null;
+  contentType: string;
+  contentPreview: string | null;
+  contentFileId: string | null;
+  contentFileUniqueId: string | null;
+  status: BacklogItemStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -81,6 +97,11 @@ export interface ReviewResultInput {
 
 export interface ListCardsParams {
   status?: CardStatus | undefined;
+  limit?: number | undefined;
+}
+
+export interface ListBacklogItemsParams {
+  status?: BacklogItemStatus | undefined;
   limit?: number | undefined;
 }
 
@@ -188,6 +209,21 @@ const rowToCard = (row: any): CardRecord => ({
   lastNotificationAt: row.last_notification_at,
   lastNotificationReason: row.last_notification_reason as NotificationReason | null,
   lastNotificationMessageId: row.last_notification_message_id,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToBacklogItem = (row: any): BacklogItemRecord => ({
+  id: row.id,
+  userId: row.user_id,
+  sourceChatId: row.source_chat_id,
+  sourceMessageId: Number(row.source_message_id),
+  sourceMessageIds: parseSourceMessageIds(row.source_message_ids),
+  contentType: row.content_type,
+  contentPreview: row.content_preview,
+  contentFileId: row.content_file_id,
+  contentFileUniqueId: row.content_file_unique_id,
+  status: row.status as BacklogItemStatus,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -573,6 +609,63 @@ export class CardStore {
     return rowToCard(rows[0]);
   }
 
+  async createBacklogItemFromPendingCard(cardId: string, ownerUserId: string): Promise<BacklogItemRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: cardRows } = await client.query(
+        `SELECT * FROM cards WHERE id = $1 FOR UPDATE`,
+        [cardId],
+      );
+      if (!cardRows.length) {
+        throw new Error(`Card ${cardId} not found`);
+      }
+      const card = rowToCard(cardRows[0]);
+      if (card.userId !== ownerUserId) {
+        throw new Error(`Backlog is not allowed for user ${card.userId}`);
+      }
+      if (card.status !== 'pending') {
+        throw new Error(`Card ${cardId} is already processed`);
+      }
+
+      const now = new Date().toISOString();
+      const { rows: backlogRows } = await client.query(
+        `
+        INSERT INTO backlog_items (
+          id, user_id, source_chat_id, source_message_id, source_message_ids,
+          content_type, content_preview, content_file_id, content_file_unique_id,
+          status, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8, $9,
+          'open', $10, $10
+        )
+        RETURNING *
+      `,
+        [
+          uuid(),
+          card.userId,
+          card.sourceChatId,
+          card.sourceMessageId,
+          serializeSourceMessageIds(card.sourceMessageIds),
+          card.contentType,
+          card.contentPreview,
+          card.contentFileId,
+          card.contentFileUniqueId,
+          now,
+        ],
+      );
+      await client.query(`DELETE FROM cards WHERE id = $1`, [cardId]);
+      await client.query('COMMIT');
+      return rowToBacklogItem(backlogRows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async deleteCard(id: string): Promise<void> {
     await this.pool.query(`DELETE FROM cards WHERE id = $1`, [id]);
   }
@@ -779,6 +872,33 @@ export class CardStore {
       [params.userId, limit],
     );
     return rows.map(rowToCard);
+  }
+
+  async listBacklogItems(params: ListBacklogItemsParams = {}): Promise<BacklogItemRecord[]> {
+    const limit = params.limit ?? 100;
+    if (params.status) {
+      const { rows } = await this.pool.query(
+        `
+        SELECT *
+        FROM backlog_items
+        WHERE status = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+      `,
+        [params.status, limit],
+      );
+      return rows.map(rowToBacklogItem);
+    }
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM backlog_items
+      ORDER BY created_at DESC
+      LIMIT $1
+    `,
+      [limit],
+    );
+    return rows.map(rowToBacklogItem);
   }
 
   async markAwaitingGrade(input: AwaitingGradeInput & { jobId?: string | null }): Promise<void> {

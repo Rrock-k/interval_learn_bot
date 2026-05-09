@@ -57,6 +57,13 @@
       "when": 1777851597003,
       "tag": "0007_add_reminder_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1778326800000,
+      "tag": "0008_add_backlog_items",
+      "breakpoints": true
     }
   ]
 }

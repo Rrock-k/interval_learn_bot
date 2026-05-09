@@ -12,7 +12,7 @@ import express, {
 import cookieParser from 'cookie-parser';
 import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
-import { CardStatus, CardStore, UserReminderSettings } from './db';
+import { BacklogItemStatus, CardStatus, CardStore, UserReminderSettings } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import { ReviewScheduler } from './reviewScheduler';
@@ -23,6 +23,7 @@ const DASHBOARD_SESSION_COOKIE = 'dashboard_session';
 const DASHBOARD_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 дней
 
 const allowedStatuses: CardStatus[] = ['pending', 'learning', 'awaiting_grade', 'archived'];
+const allowedBacklogStatuses: BacklogItemStatus[] = ['open', 'done', 'archived'];
 
 const parseLimit = (value: unknown, fallback: number) => {
   if (typeof value !== 'string') return fallback;
@@ -94,6 +95,9 @@ export const createHttpServer = (
     maxAge: DASHBOARD_SESSION_DURATION_MS,
   };
   const expectedSecretHash = hashSecret(config.dashboardSecret);
+  const expectedAgentApiTokenHash = config.agentApiToken
+    ? hashSecret(config.agentApiToken)
+    : null;
 
   const getSessionToken = (req: Request): string | undefined => {
     const token = req.cookies?.[DASHBOARD_SESSION_COOKIE];
@@ -117,6 +121,29 @@ export const createHttpServer = (
       return;
     }
     res.status(401).json({ error: 'Необходима авторизация' });
+  };
+
+  const getAgentApiToken = (req: Request): string | undefined => {
+    const authHeader = req.get('authorization');
+    const bearerMatch = authHeader?.match(/^Bearer\s+(.+)$/i);
+    if (bearerMatch?.[1]) {
+      return bearerMatch[1].trim();
+    }
+    const fallbackHeader = req.get('x-agent-token');
+    return fallbackHeader?.trim() || undefined;
+  };
+
+  const requireAgentApiAuth = (req: Request, res: Response, next: NextFunction) => {
+    if (!expectedAgentApiTokenHash) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    const token = getAgentApiToken(req);
+    if (!token || !timingSafeEqual(hashSecret(token), expectedAgentApiTokenHash)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    next();
   };
 
   app.use(cookieParser());
@@ -532,6 +559,25 @@ export const createHttpServer = (
   );
   app.use(express.static(publicDir));
 
+  app.get('/api/agent/backlog', requireAgentApiAuth, async (req, res) => {
+    const status = req.query.status as BacklogItemStatus | undefined;
+    const limit = parseLimit(req.query.limit, 100);
+    if (status && !allowedBacklogStatuses.includes(status)) {
+      res.status(400).json({ error: 'Invalid backlog status' });
+      return;
+    }
+    try {
+      const items = await withDbRetry(() => store.listBacklogItems({ status, limit }));
+      res.json({
+        data: items,
+        count: items.length,
+      });
+    } catch (error) {
+      logger.error('Ошибка чтения agent backlog API', error);
+      res.status(500).json({ error: 'Failed to load backlog' });
+    }
+  });
+
   // Dashboard routes (require dashboard auth)
   app.use(requireDashboardAuth);
 
@@ -548,6 +594,22 @@ export const createHttpServer = (
     } catch (error) {
       logger.error('Ошибка чтения карточек', error);
       res.status(500).json({ error: 'Не удалось загрузить карточки' });
+    }
+  });
+
+  app.get('/api/backlog', async (req, res) => {
+    const status = req.query.status as BacklogItemStatus | undefined;
+    const limit = parseLimit(req.query.limit, 100);
+    if (status && !allowedBacklogStatuses.includes(status)) {
+      res.status(400).json({ error: 'Неверный статус бэклога' });
+      return;
+    }
+    try {
+      const items = await withDbRetry(() => store.listBacklogItems({ status, limit }));
+      res.json({ data: items });
+    } catch (error) {
+      logger.error('Ошибка чтения бэклога', error);
+      res.status(500).json({ error: 'Не удалось загрузить бэклог' });
     }
   });
 
