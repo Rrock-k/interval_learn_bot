@@ -17,6 +17,7 @@ import {
   buildOneTimePickerKeyboard,
   buildOneTimeTimeKeyboard,
   buildReminderJobKeyboard,
+  buildCustomScheduleInputKeyboard,
   buildSchedulePickerKeyboard,
   buildReminderManagementKeyboard,
   buildWeekdayPickerKeyboard,
@@ -271,7 +272,7 @@ const extractMediaGroupMessageIds = (messages: Message[]) => {
   return Array.from(unique).sort((a, b) => a - b);
 };
 
-const buildAddKeyboard = (cardId: string, canSendBacklog = false) => {
+export const buildAddKeyboard = (cardId: string, canSendBacklog = false) => {
   const rows = [
     [Markup.button.callback('Добавить в обучение', `${ACTIONS.confirm}|${cardId}`)],
     [
@@ -559,6 +560,30 @@ export const createBot = (store: CardStore) => {
       return true;
     } catch (error) {
       logger.warn('Не удалось обновить сообщение после ввода расписания', error);
+      return false;
+    }
+  };
+
+  const updateCustomScheduleReplyMarkup = async ({
+    pending,
+    replyMarkup,
+  }: {
+    pending: PendingScheduleInput;
+    replyMarkup: InlineKeyboardMarkup;
+  }) => {
+    if (!pending.chatId || pending.messageId <= 0) {
+      return false;
+    }
+    try {
+      await bot.telegram.editMessageReplyMarkup(
+        pending.chatId,
+        pending.messageId,
+        undefined,
+        replyMarkup,
+      );
+      return true;
+    } catch (error) {
+      logger.warn('Не удалось обновить клавиатуру после ввода расписания', error);
       return false;
     }
   };
@@ -861,16 +886,16 @@ export const createBot = (store: CardStore) => {
             const updatedCard = await withDbRetry(() =>
               store.getCardById(pending.cardId),
             );
-            const restored = await restoreCustomScheduleMessage({
+            const restored = await updateCustomScheduleReplyMarkup({
               pending,
-              text: successMessage,
               replyMarkup: buildReminderManagementKeyboard(updatedCard.id).reply_markup,
             });
-            if (!restored) {
-              await ctx.reply(successMessage, {
-                reply_markup: buildReminderManagementKeyboard(updatedCard.id).reply_markup,
-              });
-            }
+            await ctx.reply(successMessage, {
+              ...(restored
+                ? {}
+                : { reply_markup: buildReminderManagementKeyboard(updatedCard.id).reply_markup }),
+              reply_parameters: { message_id: ctx.message.message_id },
+            });
           } else {
             const handledMessage = 'Эта карточка уже обработана';
             const restoreText = card.contentPreview
@@ -972,7 +997,10 @@ export const createBot = (store: CardStore) => {
         return;
       }
       await ctx.editMessageReplyMarkup(
-        buildAddKeyboard(cardId).reply_markup,
+        buildAddKeyboard(
+          cardId,
+          isBacklogOwner(ctx.from?.id) && isBacklogOwner(card.userId),
+        ).reply_markup,
       );
       await ctx.answerCbQuery();
     } catch (error) {
@@ -1311,17 +1339,61 @@ export const createBot = (store: CardStore) => {
     }, SCHEDULE_INPUT_TTL_MS);
 
     try {
-      await ctx.editMessageText(
+      await ctx.editMessageReplyMarkup(
+        buildCustomScheduleInputKeyboard(subjectId, schedCtx).reply_markup,
+      );
+      await ctx.reply(
         'Напишите расписание текстом, например:\n'
         + '• «каждый день», «через день»\n'
         + '• «каждые 3 дня», «раз в 2 недели»\n'
         + '• «каждый месяц», «каждый год»\n'
-        + '• «пн, ср, пт»',
+        + '• «пн, ср, пт»\n\n'
+        + 'Чтобы отменить ввод, нажмите «К расписанию» под исходным сообщением.',
+        ctx.callbackQuery?.message?.message_id
+          ? { reply_parameters: { message_id: ctx.callbackQuery.message.message_id } }
+          : undefined,
       );
       await ctx.answerCbQuery();
     } catch (error) {
       logger.error('Не удалось показать подсказку ввода расписания', error);
       await ctx.answerCbQuery('Ошибка', { show_alert: true });
+    }
+  });
+
+  bot.action(new RegExp(`^${CARD_ACTIONS.customScheduleBack}\\|(a|r)\\|(.+)$`), async (ctx) => {
+    const schedCtx = ctx.match?.[1] as 'a' | 'r' | undefined;
+    const subjectId = ctx.match?.[2];
+    const fromUserId = ctx.from?.id;
+    if (!subjectId || !schedCtx || !fromUserId) {
+      await ctx.answerCbQuery('Некорректное действие');
+      return;
+    }
+    pendingScheduleInputs.delete(`${fromUserId}`);
+
+    try {
+      if (schedCtx === 'a') {
+        const card = await withDbRetry(() => store.getCardById(subjectId));
+        if (card.status !== 'pending') {
+          await ctx.answerCbQuery('Эта карточка уже обработана');
+          return;
+        }
+        await ctx.editMessageReplyMarkup(
+          buildSchedulePickerKeyboard(subjectId, 'a').reply_markup,
+        );
+      } else {
+        const actionContext = await getReviewActionContext(subjectId);
+        if (!actionContext || actionContext.job?.kind === 'one_time') {
+          await ctx.answerCbQuery('Повтор уже обработан');
+          return;
+        }
+        await ctx.editMessageReplyMarkup(
+          buildSchedulePickerKeyboard(actionContext.subjectId, 'r').reply_markup,
+        );
+      }
+      await ctx.answerCbQuery('Ввод отменён');
+    } catch (error) {
+      logger.error('Не удалось отменить ручной ввод расписания', error);
+      await ctx.answerCbQuery('Ошибка (E_CUSTOM_SCHED_BACK)', { show_alert: true });
     }
   });
 

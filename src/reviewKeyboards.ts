@@ -28,6 +28,7 @@ export const CARD_ACTIONS = {
   pickOneTimeDate: 'od',
   setOneTimeDateTime: 'ott',
   customOneTime: 'ou',
+  customScheduleBack: 'csb',
   noop: 'noop',
   weekdayToggle: 'wt',
   weekdayConfirm: 'wc',
@@ -263,6 +264,19 @@ export const buildSchedulePickerKeyboard = (
     [Markup.button.callback('⬅️ Назад', backAction)],
   ]);
 };
+
+export const buildCustomScheduleInputKeyboard = (
+  subjectId: string,
+  ctx: 'a' | 'r',
+) =>
+  Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        '⬅️ К расписанию',
+        `${CARD_ACTIONS.customScheduleBack}|${ctx}|${subjectId}`,
+      ),
+    ],
+  ]);
 
 /**
  * Build weekday toggle keyboard.

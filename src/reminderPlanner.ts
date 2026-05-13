@@ -55,6 +55,92 @@ const normalizeToActiveWindow = (candidate: dayjs.Dayjs, settings: DeliverySetti
   return candidate;
 };
 
+const activeWindowBounds = (settings: DeliverySettings) => ({
+  start: Math.max(0, Math.min(settings.activeHoursStart, 23 * 60 + 59)),
+  end: Math.max(
+    Math.max(0, Math.min(settings.activeHoursStart, 23 * 60 + 59)) + 1,
+    Math.min(settings.activeHoursEnd, 24 * 60),
+  ),
+});
+
+const isInsideActiveWindow = (candidate: dayjs.Dayjs, settings: DeliverySettings) => {
+  const { start, end } = activeWindowBounds(settings);
+  const currentMinutes = minutesOfDay(candidate);
+  return currentMinutes >= start && currentMinutes < end;
+};
+
+const candidateKey = (candidate: dayjs.Dayjs) => String(candidate.valueOf());
+
+const candidateConflictMinutes = (
+  candidate: dayjs.Dayjs,
+  existing: dayjs.Dayjs[],
+  minGap: number,
+) =>
+  existing.reduce((total, value) => {
+    const distance = Math.abs(candidate.diff(value, 'minute', true));
+    return total + Math.max(0, minGap - distance);
+  }, 0);
+
+const candidateDensityPenalty = (
+  candidate: dayjs.Dayjs,
+  existing: dayjs.Dayjs[],
+  minGap: number,
+) => {
+  const densityWindow = Math.max(minGap * 4, 120);
+  return existing.reduce((total, value) => {
+    const distance = Math.abs(candidate.diff(value, 'minute', true));
+    if (distance >= densityWindow) return total;
+    return total + (densityWindow - distance) / densityWindow;
+  }, 0);
+};
+
+const sparseCandidates = ({
+  target,
+  existing,
+  minGap,
+  settings,
+}: {
+  target: dayjs.Dayjs;
+  existing: dayjs.Dayjs[];
+  minGap: number;
+  settings: DeliverySettings;
+}) => {
+  const { start, end } = activeWindowBounds(settings);
+  const horizonEnd = target.add(7, 'day');
+  const stepMinutes = Math.max(5, Math.min(minGap, 30));
+  const candidates = new Map<string, dayjs.Dayjs>();
+  const addCandidate = (value: dayjs.Dayjs) => {
+    if (!value.isValid()) return;
+    const normalized = normalizeToActiveWindow(value, settings);
+    if (normalized.isBefore(target)) return;
+    if (normalized.isAfter(horizonEnd)) return;
+    if (!isInsideActiveWindow(normalized, settings)) return;
+    candidates.set(candidateKey(normalized), normalized);
+  };
+
+  addCandidate(target);
+  for (const existingValue of existing) {
+    addCandidate(existingValue.add(minGap, 'minute'));
+    addCandidate(existingValue.subtract(minGap, 'minute'));
+  }
+
+  for (let dayOffset = 0; dayOffset <= 7; dayOffset += 1) {
+    const day = target.startOf('day').add(dayOffset, 'day');
+    let cursor = setMinutesOfDay(day, start);
+    const windowEnd = setMinutesOfDay(day, end);
+    if (cursor.isBefore(target)) {
+      cursor = target;
+    }
+    cursor = normalizeToActiveWindow(cursor, settings);
+    while (cursor.isBefore(windowEnd) && !cursor.isAfter(horizonEnd)) {
+      addCandidate(cursor);
+      cursor = cursor.add(stepMinutes, 'minute');
+    }
+  }
+
+  return Array.from(candidates.values()).sort((a, b) => a.valueOf() - b.valueOf());
+};
+
 export const planReminderDelivery = ({
   dueAt,
   existingScheduledAt,
@@ -70,6 +156,28 @@ export const planReminderDelivery = ({
     .map((value) => dayjs(value).tz(settings.timezone))
     .filter((value) => value.isValid())
     .sort((a, b) => a.valueOf() - b.valueOf());
+
+  const candidates = sparseCandidates({
+    target: candidate,
+    existing: sortedExisting,
+    minGap,
+    settings,
+  });
+  const scoredCandidates = candidates
+    .map((value) => {
+      const conflict = candidateConflictMinutes(value, sortedExisting, minGap);
+      const density = candidateDensityPenalty(value, sortedExisting, minGap);
+      const distance = Math.abs(value.diff(candidate, 'minute', true));
+      return {
+        value,
+        score: conflict * 10_000 + density * minGap + distance,
+      };
+    })
+    .sort((a, b) => a.score - b.score || a.value.valueOf() - b.value.valueOf());
+  const bestCandidate = scoredCandidates[0]?.value;
+  if (bestCandidate) {
+    return bestCandidate.toISOString();
+  }
 
   for (const existing of sortedExisting) {
     const gapMinutes = Math.abs(candidate.diff(existing, 'minute'));

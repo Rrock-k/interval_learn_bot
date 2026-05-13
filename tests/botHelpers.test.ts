@@ -1,10 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { normalizeContentPreview, parseMessage, parseMediaGroup } from '../src/bot';
+import { buildAddKeyboard, normalizeContentPreview, parseMessage, parseMediaGroup } from '../src/bot';
 
 type AnyMessage = Record<string, unknown>;
 
 const withType = <T>(value: T): AnyMessage => value as AnyMessage;
+
+const keyboardLabels = (keyboard: ReturnType<typeof buildAddKeyboard>) =>
+  keyboard.reply_markup.inline_keyboard.flat().map((button) => button.text);
 
 test('normalizeContentPreview trims whitespace и убирает пустые значения', () => {
   assert.equal(normalizeContentPreview(null), null);
@@ -91,6 +94,11 @@ test('parseMessage: возвращает null на некорректных ти
 test('parseMessage: сохраняет длинный preview без потери текста', () => {
   const parsed = parseMessage(withType({ text: 'a'.repeat(250) }));
   assert.equal(parsed?.preview?.length, 250);
+});
+
+test('buildAddKeyboard: owner-only backlog button', () => {
+  assert.ok(keyboardLabels(buildAddKeyboard('card-1', true)).includes('В бэклог агента'));
+  assert.ok(!keyboardLabels(buildAddKeyboard('card-1', false)).includes('В бэклог агента'));
 });
 
 test('parseMediaGroup: пропускает неподдерживаемые сообщения и берет первую валидную карточку', () => {
