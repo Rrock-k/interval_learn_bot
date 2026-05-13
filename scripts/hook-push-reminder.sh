@@ -44,13 +44,9 @@ State:
 Before stopping, commit and push finished code when it is safe to publish.
 If the remaining step is destructive or mutates external data (production DB, Railway env, data migrations/rewrite, deploy-time data operation), do not perform it automatically. Ask the user for explicit approval and state that push/publish is deferred pending consent."
 
-REASON="$reason" node -e '
-const reason = process.env.REASON || "";
+MESSAGE="$reason" node -e '
+const message = process.env.MESSAGE || "";
 console.log(JSON.stringify({
-  continue: false,
-  stopReason: "push reminder",
-  systemMessage: reason,
-  decision: "block",
-  reason
+  systemMessage: message
 }));
 '

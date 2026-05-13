@@ -45,5 +45,5 @@ npm run migrate  # миграции БД
 
 ## Hooks
 
-- Stop hook `scripts/hook-push-reminder.sh` напоминает не завершать итерацию с незакоммиченными изменениями или unpushed commits.
+- Stop hook `scripts/hook-push-reminder.sh` мягко напоминает не завершать итерацию с незакоммиченными изменениями или unpushed commits; он не блокирует stop.
 - Исключение: если следующий шаг разрушительный или мутирует внешние данные (prod DB, Railway env, data migration/rewrite), сначала запроси согласие пользователя.
