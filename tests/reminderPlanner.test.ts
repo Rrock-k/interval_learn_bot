@@ -1,7 +1,11 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import dayjs from 'dayjs';
-import { DeliverySettings, planReminderDelivery } from '../src/reminderPlanner';
+import {
+  DeliverySettings,
+  planReminderDelivery,
+  planReminderRebalance,
+} from '../src/reminderPlanner';
 
 const settings: DeliverySettings = {
   timezone: 'Asia/Tbilisi',
@@ -43,4 +47,38 @@ test('planReminderDelivery uses exact gaps around existing reminders', () => {
     settings,
   });
   assert.equal(dayjs(planned).toISOString(), '2026-05-13T08:50:00.000Z');
+});
+
+test('planReminderRebalance distributes a crowded batch without mutating fixed reminders', () => {
+  const changes = planReminderRebalance({
+    jobs: [
+      {
+        id: 'a',
+        dueAt: '2026-05-13T08:00:00.000Z',
+        scheduledAt: '2026-05-13T08:00:00.000Z',
+      },
+      {
+        id: 'b',
+        dueAt: '2026-05-13T08:00:00.000Z',
+        scheduledAt: '2026-05-13T08:00:00.000Z',
+      },
+      {
+        id: 'c',
+        dueAt: '2026-05-13T08:00:00.000Z',
+        scheduledAt: '2026-05-13T08:00:00.000Z',
+      },
+    ],
+    fixedScheduledAt: ['2026-05-13T08:30:00.000Z'],
+    settings,
+    now: '2026-05-13T07:00:00.000Z',
+  });
+
+  assert.deepEqual(
+    changes.map((change) => dayjs(change.afterScheduledAt).toISOString()),
+    [
+      '2026-05-13T08:00:00.000Z',
+      '2026-05-13T09:00:00.000Z',
+      '2026-05-13T09:30:00.000Z',
+    ],
+  );
 });

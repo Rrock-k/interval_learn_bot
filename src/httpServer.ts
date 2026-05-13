@@ -12,9 +12,15 @@ import express, {
 import cookieParser from 'cookie-parser';
 import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
-import { BacklogItemStatus, CardStatus, CardStore, UserReminderSettings } from './db';
+import {
+  BacklogItemStatus,
+  CardStatus,
+  CardStore,
+  UserReminderSettings,
+} from './db';
 import { config } from './config';
 import { logger } from './logger';
+import { ReminderRebalancePreviewChange } from './reminderRebalance';
 import { ReviewScheduler } from './reviewScheduler';
 import { withDbRetry } from './utils/dbRetry';
 
@@ -77,6 +83,37 @@ const parseReminderSettings = (body: unknown): UserReminderSettings | null => {
     activeHoursEnd,
     minGapMinutes,
   };
+};
+
+const parseRebalanceOptions = (body: unknown) => {
+  const input = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const horizonDays = Number(input.horizonDays ?? 7);
+  const bucketMinutes = Number(input.bucketMinutes ?? 30);
+  return {
+    horizonDays: Number.isInteger(horizonDays) ? Math.min(30, Math.max(1, horizonDays)) : 7,
+    bucketMinutes: Number.isInteger(bucketMinutes)
+      ? Math.min(120, Math.max(15, bucketMinutes))
+      : 30,
+  };
+};
+
+const parseRebalanceChanges = (body: unknown): ReminderRebalancePreviewChange[] | null => {
+  if (!body || typeof body !== 'object') return null;
+  const changes = (body as Record<string, unknown>).changes;
+  if (!Array.isArray(changes)) return null;
+  return changes.map((entry) => {
+    const input = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
+    return {
+      id: String(input.id ?? input.jobId ?? ''),
+      jobId: String(input.jobId ?? input.id ?? ''),
+      cardId: String(input.cardId ?? ''),
+      contentPreview: typeof input.contentPreview === 'string' ? input.contentPreview : null,
+      dueAt: String(input.dueAt ?? ''),
+      beforeScheduledAt: String(input.beforeScheduledAt ?? ''),
+      afterScheduledAt: String(input.afterScheduledAt ?? ''),
+      deltaMinutes: Number(input.deltaMinutes ?? 0),
+    };
+  });
 };
 
 export const createHttpServer = (
@@ -273,12 +310,31 @@ export const createHttpServer = (
     next();
   };
 
+  const requireMiniAppOwner = (req: Request, res: Response, next: NextFunction) => {
+    const userId = (req as any).userId;
+    if (userId !== config.backlogOwnerUserId) {
+      res.status(403).json({ error: 'Owner-only tool' });
+      return;
+    }
+    next();
+  };
+
   // Mini App public routes
   app.get('/miniapp', (_req, res) => {
     res.sendFile(path.join(publicDir, 'miniapp', 'index.html'));
   });
 
   // Mini App API routes
+  app.get('/api/miniapp/me', requireMiniAppAuth, (req, res) => {
+    const userId = (req as any).userId;
+    res.json({
+      data: {
+        userId,
+        ownerTools: userId === config.backlogOwnerUserId,
+      },
+    });
+  });
+
   app.get('/api/miniapp/cards', requireMiniAppAuth, async (req, res) => {
     const userId = (req as any).userId;
     const status = req.query.status as CardStatus | undefined;
@@ -420,6 +476,54 @@ export const createHttpServer = (
       res.status(500).json({ error: 'Failed to update reminder settings' });
     }
   });
+
+  app.post(
+    '/api/miniapp/reminders/rebalance/preview',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const options = parseRebalanceOptions(req.body);
+      try {
+        const preview = await withDbRetry(() =>
+          store.previewReminderRebalance(userId, options),
+        );
+        res.json({ data: preview });
+      } catch (error) {
+        logger.error('Error building reminder rebalance preview for Mini App', error);
+        res.status(500).json({ error: 'Failed to build rebalance preview' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/reminders/rebalance/apply',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const changes = parseRebalanceChanges(req.body);
+      if (!changes) {
+        res.status(400).json({ error: 'Invalid rebalance changes' });
+        return;
+      }
+      try {
+        const result = await withDbRetry(() =>
+          store.applyReminderRebalance(userId, changes),
+        );
+        res.json({ ok: true, data: result });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to apply rebalance plan';
+        logger.error('Error applying reminder rebalance for Mini App', error);
+        if (message.includes('changed since preview') || message.includes('no longer movable')) {
+          res.status(409).json({ error: message });
+          return;
+        }
+        res.status(500).json({ error: message });
+      }
+    },
+  );
 
   app.post('/api/miniapp/cards/:id/status', requireMiniAppAuth, async (req, res) => {
     const userId = (req as any).userId;

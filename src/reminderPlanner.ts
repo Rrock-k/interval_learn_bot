@@ -12,6 +12,20 @@ export interface DeliverySettings {
   minGapMinutes: number;
 }
 
+export interface RebalanceJobInput {
+  id: string;
+  dueAt: string;
+  scheduledAt: string;
+}
+
+export interface RebalancePlanChange {
+  id: string;
+  dueAt: string;
+  beforeScheduledAt: string;
+  afterScheduledAt: string;
+  deltaMinutes: number;
+}
+
 export const DEFAULT_DELIVERY_SETTINGS: DeliverySettings = {
   timezone: process.env.DEFAULT_REMINDER_TIMEZONE || 'Asia/Tbilisi',
   activeHoursStart: parseClockToMinutes(process.env.DEFAULT_ACTIVE_HOURS_START, 10 * 60),
@@ -187,4 +201,51 @@ export const planReminderDelivery = ({
   }
 
   return candidate.toISOString();
+};
+
+export const planReminderRebalance = ({
+  jobs,
+  fixedScheduledAt,
+  settings,
+  now = new Date().toISOString(),
+}: {
+  jobs: RebalanceJobInput[];
+  fixedScheduledAt: string[];
+  settings: DeliverySettings;
+  now?: string;
+}): RebalancePlanChange[] => {
+  const nowMs = Date.parse(now);
+  const existingScheduledAt = [...fixedScheduledAt];
+  const sortedJobs = [...jobs].sort((a, b) => {
+    const dueDiff = Date.parse(a.dueAt) - Date.parse(b.dueAt);
+    if (dueDiff !== 0) return dueDiff;
+    const scheduledDiff = Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt);
+    if (scheduledDiff !== 0) return scheduledDiff;
+    return a.id.localeCompare(b.id);
+  });
+
+  return sortedJobs.map((job) => {
+    const dueMs = Date.parse(job.dueAt);
+    const scheduledMs = Date.parse(job.scheduledAt);
+    const fallbackMs = Number.isFinite(scheduledMs) ? scheduledMs : nowMs;
+    const targetMs = Number.isFinite(dueMs)
+      ? Number.isFinite(nowMs)
+        ? Math.max(dueMs, nowMs)
+        : dueMs
+      : fallbackMs;
+    const target = new Date(targetMs).toISOString();
+    const planned = planReminderDelivery({
+      dueAt: target,
+      existingScheduledAt,
+      settings,
+    });
+    existingScheduledAt.push(planned);
+    return {
+      id: job.id,
+      dueAt: job.dueAt,
+      beforeScheduledAt: job.scheduledAt,
+      afterScheduledAt: planned,
+      deltaMinutes: Math.round((Date.parse(planned) - Date.parse(job.scheduledAt)) / 60_000),
+    };
+  });
 };

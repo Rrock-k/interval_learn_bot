@@ -6,6 +6,11 @@ import {
   DeliverySettings,
   planReminderDelivery,
 } from './reminderPlanner';
+import {
+  ReminderRebalancePreview,
+  ReminderRebalancePreviewChange,
+  buildReminderRebalancePreview,
+} from './reminderRebalance';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 export type BacklogItemStatus = 'open' | 'done' | 'archived';
@@ -103,6 +108,11 @@ export interface ListCardsParams {
 export interface ListBacklogItemsParams {
   status?: BacklogItemStatus | undefined;
   limit?: number | undefined;
+}
+
+export interface ReminderRebalanceOptions {
+  horizonDays: number;
+  bucketMinutes: number;
 }
 
 export interface RecordNotificationInput {
@@ -456,6 +466,142 @@ export class CardStore {
       ],
     );
     return this.getUserReminderSettings(userId);
+  }
+
+  async previewReminderRebalance(
+    userId: string,
+    options: ReminderRebalanceOptions,
+  ): Promise<ReminderRebalancePreview> {
+    const settings = await this.getDeliverySettings(userId);
+    const generatedAt = new Date().toISOString();
+    const horizonDays = Math.min(30, Math.max(1, Math.floor(options.horizonDays)));
+    const horizonEnd = new Date(Date.parse(generatedAt) + horizonDays * 24 * 60 * 60_000);
+    const fixedStart = new Date(Date.parse(generatedAt) - 24 * 60 * 60_000);
+    const fixedEnd = new Date(horizonEnd.getTime() + 7 * 24 * 60 * 60_000);
+    const { rows: movingRows } = await this.pool.query(
+      `
+      SELECT reminder_jobs.*, cards.content_preview
+      FROM reminder_jobs
+      JOIN cards ON cards.id = reminder_jobs.card_id
+      WHERE reminder_jobs.user_id = $1
+        AND reminder_jobs.status = 'pending'
+        AND reminder_jobs.kind = 'review'
+        AND reminder_jobs.scheduled_at >= $2
+        AND reminder_jobs.scheduled_at < $3
+        AND cards.status <> 'archived'
+      ORDER BY reminder_jobs.scheduled_at ASC
+      LIMIT 500
+    `,
+      [userId, generatedAt, horizonEnd.toISOString()],
+    );
+    const movingIds = movingRows.map((row) => row.id);
+    const { rows: fixedRows } = await this.pool.query(
+      `
+      SELECT scheduled_at
+      FROM reminder_jobs
+      WHERE user_id = $1
+        AND status = 'pending'
+        AND scheduled_at >= $2
+        AND scheduled_at < $3
+        AND NOT (id = ANY($4::text[]))
+      ORDER BY scheduled_at ASC
+    `,
+      [userId, fixedStart.toISOString(), fixedEnd.toISOString(), movingIds],
+    );
+    return buildReminderRebalancePreview({
+      jobs: movingRows.map((row) => ({
+        id: row.id,
+        cardId: row.card_id,
+        contentPreview: row.content_preview ?? null,
+        dueAt: row.due_at,
+        scheduledAt: row.scheduled_at,
+      })),
+      fixedScheduledAt: fixedRows.map((row) => row.scheduled_at),
+      visibleFixedScheduledAt: fixedRows
+        .map((row) => row.scheduled_at)
+        .filter((scheduledAt) => {
+          const value = Date.parse(scheduledAt);
+          return value >= Date.parse(generatedAt) && value < horizonEnd.getTime();
+        }),
+      settings,
+      generatedAt,
+      horizonDays,
+      bucketMinutes: options.bucketMinutes,
+    });
+  }
+
+  async applyReminderRebalance(
+    userId: string,
+    changes: ReminderRebalancePreviewChange[],
+  ): Promise<{ updated: number }> {
+    if (changes.length > 500) {
+      throw new Error('Too many reminder changes');
+    }
+    const now = new Date().toISOString();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      let updated = 0;
+      for (const change of changes) {
+        if (!change.jobId || !change.beforeScheduledAt || !change.afterScheduledAt) {
+          throw new Error('Invalid reminder rebalance change');
+        }
+        if (Number.isNaN(Date.parse(change.beforeScheduledAt)) || Number.isNaN(Date.parse(change.afterScheduledAt))) {
+          throw new Error('Invalid reminder rebalance date');
+        }
+        const { rows } = await client.query(
+          `
+          SELECT reminder_jobs.*, cards.status AS card_status
+          FROM reminder_jobs
+          JOIN cards ON cards.id = reminder_jobs.card_id
+          WHERE reminder_jobs.id = $1
+            AND reminder_jobs.user_id = $2
+          FOR UPDATE OF reminder_jobs
+        `,
+          [change.jobId, userId],
+        );
+        if (!rows.length) {
+          throw new Error(`Reminder job ${change.jobId} not found`);
+        }
+        const row = rows[0];
+        if (row.kind !== 'review' || row.status !== 'pending' || row.card_status === 'archived') {
+          throw new Error(`Reminder job ${change.jobId} is no longer movable`);
+        }
+        if (row.scheduled_at !== change.beforeScheduledAt) {
+          throw new Error(`Reminder job ${change.jobId} changed since preview`);
+        }
+        if (change.beforeScheduledAt === change.afterScheduledAt) {
+          continue;
+        }
+        await client.query(
+          `
+          UPDATE reminder_jobs
+          SET scheduled_at = $1,
+              updated_at = $2
+          WHERE id = $3
+        `,
+          [change.afterScheduledAt, now, change.jobId],
+        );
+        await client.query(
+          `
+          UPDATE cards
+          SET next_review_at = $1,
+              updated_at = $2
+          WHERE id = $3
+            AND status <> 'archived'
+        `,
+          [change.afterScheduledAt, now, row.card_id],
+        );
+        updated += 1;
+      }
+      await client.query('COMMIT');
+      return { updated };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private async planScheduledAt(userId: string, dueAt: string): Promise<string> {

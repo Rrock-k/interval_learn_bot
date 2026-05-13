@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
   Archive,
+  BarChart3,
   Bell,
   CalendarDays,
   CheckCircle2,
@@ -38,7 +39,7 @@ import { cn } from './lib/utils';
 import { buildMessageLink, getMessageLink } from './linkUtils';
 
 type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
-type ViewName = 'cards' | 'calendar' | 'stats' | 'card-detail' | 'notification-detail';
+type ViewName = 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
 type SortMode = 'nextReviewAsc' | 'nextReviewDesc' | 'updatedDesc' | 'repetitionDesc';
 type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
 
@@ -83,9 +84,52 @@ type ReminderSettings = {
   minGapMinutes: number;
 };
 
+type MiniAppProfile = {
+  userId: string;
+  ownerTools: boolean;
+};
+
+type RebalanceChange = {
+  id: string;
+  jobId: string;
+  cardId: string;
+  contentPreview: string | null;
+  dueAt: string;
+  beforeScheduledAt: string;
+  afterScheduledAt: string;
+  deltaMinutes: number;
+};
+
+type RebalancePreview = {
+  planToken: string;
+  generatedAt: string;
+  horizonDays: number;
+  bucketMinutes: number;
+  settings: ReminderSettings;
+  range: { start: string; end: string };
+  metrics: {
+    total: number;
+    moved: number;
+    maxBucketBefore: number;
+    maxBucketAfter: number;
+    conflictCountBefore: number;
+    conflictCountAfter: number;
+    averageDeltaMinutes: number;
+    maxDeltaMinutes: number;
+  };
+  heatmap: {
+    days: string[];
+    dayLabels: string[];
+    slots: string[];
+    before: number[][];
+    after: number[][];
+  };
+  changes: RebalanceChange[];
+};
+
 type TelegramWebApp = {
   initData: string;
-  initDataUnsafe?: { start_param?: string };
+  initDataUnsafe?: { start_param?: string; user?: { id?: number | string } };
   themeParams?: Record<string, string>;
   ready?: () => void;
   expand?: () => void;
@@ -311,10 +355,13 @@ async function copyText(value: string) {
 export function App() {
   const [view, setView] = useState<ViewName>('cards');
   const [cards, setCards] = useState<CardRecord[]>([]);
+  const [profile, setProfile] = useState<MiniAppProfile | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [reminderSettings, setReminderSettings] = useState<ReminderSettings | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [rebalancePreview, setRebalancePreview] = useState<RebalancePreview | null>(null);
+  const [rebalanceError, setRebalanceError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<CardStatus | 'all'>('all');
   const [sortMode, setSortMode] = useState<SortMode>('nextReviewAsc');
   const [query, setQuery] = useState('');
@@ -331,6 +378,8 @@ export function App() {
       ? 'Карточка'
       : view === 'notification-detail'
         ? 'Уведомление'
+        : view === 'balance'
+          ? 'Распределение'
         : view === 'calendar'
           ? 'Календарь'
           : view === 'stats'
@@ -341,6 +390,8 @@ export function App() {
       ? 'Ближайшие повторения по дням.'
       : view === 'stats'
         ? 'Короткая сводка по прогрессу.'
+        : view === 'balance'
+          ? 'Визуальная проверка расписания до применения.'
         : view === 'card-detail'
           ? 'Содержимое, расписание и действия.'
           : view === 'notification-detail'
@@ -382,6 +433,19 @@ export function App() {
     }
   };
 
+  const loadProfile = async () => {
+    if (demo) {
+      setProfile({ userId: String(tg.initDataUnsafe?.user?.id ?? 'demo'), ownerTools: true });
+      return;
+    }
+    try {
+      const result = await apiCall<{ data: MiniAppProfile }>('/api/miniapp/me');
+      setProfile(result.data);
+    } catch {
+      setProfile({ userId: '', ownerTools: false });
+    }
+  };
+
   const loadStats = async () => {
     setStatsError(null);
     if (demo) {
@@ -411,6 +475,7 @@ export function App() {
   };
 
   useEffect(() => {
+    void loadProfile();
     void loadCards('all');
   }, []);
 
@@ -425,7 +490,7 @@ export function App() {
       setSelectedCardId(deepLink.cardId);
       setView('notification-detail');
     }
-    if (deepLink.type === 'view' && ['cards', 'calendar', 'stats'].includes(deepLink.view)) {
+    if (deepLink.type === 'view' && ['cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
       setView(deepLink.view);
     }
   }, [loading, cards.length]);
@@ -436,6 +501,12 @@ export function App() {
       void loadReminderSettings();
     }
   }, [view]);
+
+  useEffect(() => {
+    if (view === 'balance' && profile && !profile.ownerTools) {
+      setView('cards');
+    }
+  }, [profile, view]);
 
   const visibleCards = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -545,6 +616,44 @@ export function App() {
     }
   };
 
+  const buildRebalancePreview = async (options: { horizonDays: number; bucketMinutes: number }) => {
+    setBusyKey('rebalance:preview');
+    setRebalanceError(null);
+    try {
+      const result = await apiCall<{ data: RebalancePreview }>('/api/miniapp/reminders/rebalance/preview', {
+        method: 'POST',
+        body: JSON.stringify(options),
+      });
+      setRebalancePreview(result.data);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Не удалось построить план';
+      setRebalanceError(message);
+      throw err;
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const applyRebalancePreview = async () => {
+    if (!rebalancePreview) return;
+    setBusyKey('rebalance:apply');
+    try {
+      const result = await apiCall<{ data: { updated: number } }>('/api/miniapp/reminders/rebalance/apply', {
+        method: 'POST',
+        body: JSON.stringify({
+          planToken: rebalancePreview.planToken,
+          changes: rebalancePreview.changes,
+        }),
+      });
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      showAlert(`Расписание обновлено: ${result.data.updated}`);
+      setRebalancePreview(null);
+      await loadCards('all');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const runConfirm = async () => {
     if (!confirm) return;
     const action = confirm.action;
@@ -568,10 +677,11 @@ export function App() {
 
       {view !== 'card-detail' && view !== 'notification-detail' ? (
         <Tabs value={view} onValueChange={(value) => setView(value as ViewName)} className="app-tabs">
-          <TabsList>
+          <TabsList className={profile?.ownerTools ? 'tabs-count-4' : undefined}>
             <TabsTrigger value="cards">Карточки</TabsTrigger>
             <TabsTrigger value="calendar">Календарь</TabsTrigger>
             <TabsTrigger value="stats">Статистика</TabsTrigger>
+            {profile?.ownerTools ? <TabsTrigger value="balance">Баланс</TabsTrigger> : null}
           </TabsList>
         </Tabs>
       ) : null}
@@ -629,6 +739,24 @@ export function App() {
             settingsError={settingsError}
             settingsSaving={busyKey === 'settings:reminders'}
             onSaveReminderSettings={saveReminderSettings}
+          />
+        ) : null}
+
+        {view === 'balance' && profile?.ownerTools ? (
+          <RebalanceScreen
+            preview={rebalancePreview}
+            error={rebalanceError}
+            busyKey={busyKey}
+            onPreview={buildRebalancePreview}
+            onApply={() =>
+              setConfirm({
+                title: 'Применить новое расписание?',
+                body: 'Будущие review-напоминания будут перенесены по показанному варианту.',
+                label: 'Применить',
+                action: applyRebalancePreview,
+              })
+            }
+            onReset={() => setRebalancePreview(null)}
           />
         ) : null}
       </main>
@@ -1046,6 +1174,192 @@ function ReminderSettingsPanel({
   );
 }
 
+function RebalanceScreen({
+  preview,
+  error,
+  busyKey,
+  onPreview,
+  onApply,
+  onReset,
+}: {
+  preview: RebalancePreview | null;
+  error: string | null;
+  busyKey: string | null;
+  onPreview: (options: { horizonDays: number; bucketMinutes: number }) => Promise<void>;
+  onApply: () => void;
+  onReset: () => void;
+}) {
+  const [horizonDays, setHorizonDays] = useState('7');
+  const [bucketMinutes, setBucketMinutes] = useState('30');
+  const loading = busyKey === 'rebalance:preview';
+  const applying = busyKey === 'rebalance:apply';
+  const build = () => {
+    void onPreview({
+      horizonDays: Number(horizonDays),
+      bucketMinutes: Number(bucketMinutes),
+    }).catch((err) => {
+      showAlert(err instanceof Error ? err.message : 'Не удалось построить план');
+    });
+  };
+
+  return (
+    <div className="balance-stack">
+      <Card className="balance-controls">
+        <div className="settings-heading">
+          <div>
+            <h2>Балансировка напоминаний</h2>
+            <p>Сначала строит визуальный вариант. Ничего не меняет без подтверждения.</p>
+          </div>
+          <BarChart3 size={20} />
+        </div>
+        <div className="settings-time-grid">
+          <label className="settings-field">
+            <span>Период</span>
+            <Select value={horizonDays} onValueChange={setHorizonDays}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="7">7 дней</SelectItem>
+                <SelectItem value="14">14 дней</SelectItem>
+                <SelectItem value="30">30 дней</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="settings-field">
+            <span>Шаг</span>
+            <Select value={bucketMinutes} onValueChange={setBucketMinutes}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="15">15 минут</SelectItem>
+                <SelectItem value="30">30 минут</SelectItem>
+                <SelectItem value="60">1 час</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+        </div>
+        {error ? <p className="settings-error">{error}</p> : null}
+        <div className="toolbar-actions">
+          <Button disabled={loading || applying} onClick={build}>Построить вариант</Button>
+          {preview ? <Button variant="ghost" disabled={loading || applying} onClick={onReset}>Сбросить</Button> : null}
+        </div>
+      </Card>
+
+      {!preview ? <StateBlock title="Плана пока нет" body="Постройте вариант, чтобы увидеть распределение до и после." /> : null}
+
+      {preview ? (
+        <>
+          <div className="balance-summary-grid">
+            <Card className="stat-card"><span>Всего</span><strong>{preview.metrics.total}</strong></Card>
+            <Card className="stat-card"><span>Перенесено</span><strong>{preview.metrics.moved}</strong></Card>
+            <Card className="stat-card"><span>Пик до</span><strong>{preview.metrics.maxBucketBefore}</strong></Card>
+            <Card className="stat-card"><span>Пик после</span><strong>{preview.metrics.maxBucketAfter}</strong></Card>
+          </div>
+
+          <HeatmapComparison preview={preview} />
+
+          <Card className="balance-diff-panel">
+            <div className="settings-heading">
+              <div>
+                <h2>Изменения</h2>
+                <p>
+                  Средний сдвиг {preview.metrics.averageDeltaMinutes} мин, максимум {preview.metrics.maxDeltaMinutes} мин.
+                </p>
+              </div>
+              <Badge tone="muted">{preview.metrics.conflictCountBefore} → {preview.metrics.conflictCountAfter}</Badge>
+            </div>
+            {preview.changes.filter((change) => change.deltaMinutes !== 0).length === 0 ? (
+              <p className="meta-text">Текущее расписание уже выглядит ровно для выбранного периода.</p>
+            ) : (
+              <div className="balance-change-list">
+                {preview.changes
+                  .filter((change) => change.deltaMinutes !== 0)
+                  .slice(0, 12)
+                  .map((change) => (
+                    <div className="balance-change-row" key={change.jobId}>
+                      <p>{change.contentPreview || 'Без текста'}</p>
+                      <span>{formatDateShort(change.beforeScheduledAt)} → {formatDateShort(change.afterScheduledAt)}</span>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </Card>
+
+          <div className="balance-actions">
+            <Button
+              disabled={applying || preview.metrics.moved === 0}
+              onClick={onApply}
+            >
+              Применить
+            </Button>
+            <Button variant="outline" disabled={applying} onClick={onReset}>Отклонить</Button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function HeatmapComparison({ preview }: { preview: RebalancePreview }) {
+  const maxCount = Math.max(preview.metrics.maxBucketBefore, preview.metrics.maxBucketAfter, 1);
+  return (
+    <div className="heatmap-comparison">
+      <Heatmap title="До" heatmap={preview.heatmap} matrix={preview.heatmap.before} maxCount={maxCount} />
+      <Heatmap title="После" heatmap={preview.heatmap} matrix={preview.heatmap.after} maxCount={maxCount} />
+    </div>
+  );
+}
+
+function Heatmap({
+  title,
+  heatmap,
+  matrix,
+  maxCount,
+}: {
+  title: string;
+  heatmap: RebalancePreview['heatmap'];
+  matrix: number[][];
+  maxCount: number;
+}) {
+  return (
+    <Card className="heatmap-panel">
+      <div className="heatmap-title">
+        <h2>{title}</h2>
+        <Badge tone="muted">max {maxMatrix(matrix)}</Badge>
+      </div>
+      <div
+        className="heatmap-grid"
+        style={{
+          gridTemplateColumns: `44px repeat(${heatmap.days.length}, minmax(24px, 1fr))`,
+        }}
+      >
+        <span />
+        {heatmap.dayLabels.map((label) => <b key={label}>{label}</b>)}
+        {heatmap.slots.map((slot, rowIndex) => (
+          <Fragment key={slot}>
+            <span key={`${slot}-label`}>{slot}</span>
+            {heatmap.days.map((day, dayIndex) => {
+              const count = matrix[rowIndex]?.[dayIndex] || 0;
+              const level = count ? Math.max(0.18, count / maxCount) : 0;
+              return (
+                <i
+                  key={`${day}-${slot}`}
+                  title={`${day} ${slot}: ${count}`}
+                  style={{ '--heat': String(level) } as CSSProperties}
+                >
+                  {count || ''}
+                </i>
+              );
+            })}
+          </Fragment>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function maxMatrix(matrix: number[][]) {
+  return matrix.reduce((max, row) => Math.max(max, ...row), 0);
+}
+
 function StateBlock({ title, body }: { title: string; body: string }) {
   return <Card className="state-block"><h2>{title}</h2><p>{body}</p></Card>;
 }
@@ -1118,6 +1432,7 @@ async function copyAndNotify(value: string, message: string) {
 
 async function demoResponse<T>(endpoint: string, options: RequestInit, cards: CardRecord[], setCards: React.Dispatch<React.SetStateAction<CardRecord[]>>) {
   const source = cards.length ? cards : demoCards;
+  if (endpoint.includes('/me')) return { data: { userId: 'demo', ownerTools: true } } as T;
   if (endpoint.includes('/stats')) return { data: buildStats(source) } as T;
   if (endpoint.includes('/settings/reminders')) {
     if (options.method === 'POST' && typeof options.body === 'string') {
@@ -1125,6 +1440,11 @@ async function demoResponse<T>(endpoint: string, options: RequestInit, cards: Ca
     }
     return { data: demoReminderSettings } as T;
   }
+  if (endpoint.includes('/reminders/rebalance/preview')) {
+    const input = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    return { data: buildDemoRebalancePreview(input.horizonDays ?? 7, input.bucketMinutes ?? 30) } as T;
+  }
+  if (endpoint.includes('/reminders/rebalance/apply')) return { data: { updated: 3 } } as T;
   if (endpoint.includes('/status')) return { ok: true } as T;
   if (endpoint.includes('/send-reminder')) return { ok: true } as T;
   if (endpoint.includes('/one-time-reminder')) return { ok: true } as T;
@@ -1132,4 +1452,48 @@ async function demoResponse<T>(endpoint: string, options: RequestInit, cards: Ca
   const data = statusMatch ? source.filter((card) => card.status === statusMatch[1]) : source;
   if (!cards.length) setCards(source);
   return { data } as T;
+}
+
+function buildDemoRebalancePreview(horizonDays: number, bucketMinutes: number): RebalancePreview {
+  const days = Array.from({ length: Number(horizonDays) || 7 }, (_value, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() + index);
+    return toDateKey(date);
+  });
+  const dayLabels = days.map((day) => new Date(`${day}T00:00:00`).toLocaleDateString('ru', { day: 'numeric', month: 'short' }));
+  const slots = ['10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30'];
+  const before = slots.map((_slot, row) => days.map((_day, col) => (col === 0 && row === 4 ? 5 : col === 1 && row === 4 ? 3 : row === 1 && col === 2 ? 2 : 0)));
+  const after = slots.map((_slot, row) => days.map((_day, col) => ((row + col) % 5 === 0 ? 1 : 0)));
+  const now = new Date().toISOString();
+  return {
+    planToken: 'demo',
+    generatedAt: now,
+    horizonDays: Number(horizonDays) || 7,
+    bucketMinutes: Number(bucketMinutes) || 30,
+    settings: demoReminderSettings,
+    range: { start: now, end: now },
+    metrics: {
+      total: 10,
+      moved: 8,
+      maxBucketBefore: 5,
+      maxBucketAfter: 1,
+      conflictCountBefore: 5,
+      conflictCountAfter: 0,
+      averageDeltaMinutes: 90,
+      maxDeltaMinutes: 180,
+    },
+    heatmap: { days, dayLabels, slots, before, after },
+    changes: [
+      {
+        id: 'demo-1',
+        jobId: 'demo-1',
+        cardId: demoCards[0].id,
+        contentPreview: demoCards[0].contentPreview,
+        dueAt: now,
+        beforeScheduledAt: now,
+        afterScheduledAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+        deltaMinutes: 60,
+      },
+    ],
+  };
 }
