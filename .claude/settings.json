@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hook-push-reminder.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

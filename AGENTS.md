@@ -42,3 +42,8 @@ npm run dev      # запуск в dev-режиме
 npm run build    # компиляция
 npm run migrate  # миграции БД
 ```
+
+## Hooks
+
+- Stop hook `scripts/hook-push-reminder.sh` напоминает не завершать итерацию с незакоммиченными изменениями или unpushed commits.
+- Исключение: если следующий шаг разрушительный или мутирует внешние данные (prod DB, Railway env, data migration/rewrite), сначала запроси согласие пользователя.

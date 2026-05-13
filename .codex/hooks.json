@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/scripts/hook-push-reminder.sh\"",
+            "statusMessage": "Checking publish state",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
