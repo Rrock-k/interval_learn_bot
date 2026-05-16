@@ -234,6 +234,28 @@ export class ReviewScheduler {
           `[ReviewScheduler sendStoredBaseMessage] job=${job.id} card=${card.id} kind=${job.kind} withKeyboard=${withKeyboard} target=${targetChatId} contentType=${card.contentType}`,
         );
         const replyMarkup = withKeyboard ? { reply_markup: keyboard.reply_markup } : {};
+        const rawPreview = normalizePreview(card.contentPreview);
+        const preview = rawPreview && !isTechnicalPreview(rawPreview) ? rawPreview : null;
+        const textFallback = preview ?? 'Карточка без текста';
+
+        if (card.contentType === 'text') {
+          const baseMessage = await this.bot.telegram.sendMessage(
+            targetChatId,
+            textFallback,
+            replyMarkup,
+          );
+          const messageId = baseMessage.message_id;
+          card.baseChannelMessageId = messageId;
+          baseMessageId = messageId;
+          await withDbRetry(() =>
+            this.store.setBaseChannelMessage(card.id, card.baseChannelMessageId),
+          );
+          logger.info(
+            `[ReviewScheduler sendStoredBaseMessage:stored_text] job=${job.id} card=${card.id} messageId=${messageId}`,
+          );
+          return messageId;
+        }
+
         const sourceIds = (card.sourceMessageIds || [])
           .map((id) => Number(id))
           .filter((id) => Number.isFinite(id));
@@ -297,9 +319,6 @@ export class ReviewScheduler {
             error,
           );
         }
-        const rawPreview = normalizePreview(card.contentPreview);
-        const preview = rawPreview && !isTechnicalPreview(rawPreview) ? rawPreview : null;
-        const textFallback = preview ?? 'Карточка без текста';
         let messageId: number;
         if (card.contentType === 'photo' && card.contentFileId) {
           try {
@@ -355,7 +374,12 @@ export class ReviewScheduler {
         return messageId;
       };
 
-      if (!card.baseChannelMessageId) {
+      if (card.contentType === 'text') {
+        logger.info(
+          `[ReviewScheduler branch] job=${job.id} card=${card.id} kind=${job.kind} branch=stored_text_base`,
+        );
+        pendingMessageId = await sendStoredBaseMessage(true);
+      } else if (!card.baseChannelMessageId) {
         logger.info(
           `[ReviewScheduler branch] job=${job.id} card=${card.id} kind=${job.kind} branch=no_base_send_full_card`,
         );
