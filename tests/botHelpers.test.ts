@@ -56,6 +56,31 @@ test('parseMessage: пустой text и пустой caption превращаю
   assert.equal(video?.preview, '[Видео]');
 });
 
+test('parseMessage: photo сохраняет самый крупный Telegram size', () => {
+  const byFileSize = parseMessage(
+    withType({
+      photo: [
+        { file_id: 'thumb', file_unique_id: 'u1', file_size: 5, width: 90, height: 23 },
+        { file_id: 'large', file_unique_id: 'u2', file_size: 200, width: 1280, height: 720 },
+      ],
+      caption: 'caption',
+    }),
+  );
+  assert.equal(byFileSize?.fileId, 'large');
+  assert.equal(byFileSize?.fileUniqueId, 'u2');
+  assert.equal(byFileSize?.preview, 'caption');
+
+  const byPixelArea = parseMessage(
+    withType({
+      photo: [
+        { file_id: 'small', file_unique_id: 'u3', width: 100, height: 100 },
+        { file_id: 'wide', file_unique_id: 'u4', width: 500, height: 300 },
+      ],
+    }),
+  );
+  assert.equal(byPixelArea?.fileId, 'wide');
+});
+
 test('parseMediaGroup: fallback preview для медиагруппы без caption', () => {
   const result = parseMediaGroup(
     [

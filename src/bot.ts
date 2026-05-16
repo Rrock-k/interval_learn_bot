@@ -141,16 +141,33 @@ export const parseMessage = (message: Message): ParsedMessageInfo | null => {
           return null;
         }
         const fileSize = typeof photo.file_size === 'number' && Number.isFinite(photo.file_size) ? photo.file_size : 0;
+        const width = typeof photo.width === 'number' && Number.isFinite(photo.width) ? photo.width : 0;
+        const height = typeof photo.height === 'number' && Number.isFinite(photo.height) ? photo.height : 0;
         const fileUniqueId =
           typeof photo.file_unique_id === 'string' ? photo.file_unique_id : '';
-        return { file_id: fileId, file_size: fileSize, file_unique_id: fileUniqueId };
+        return {
+          file_id: fileId,
+          file_size: fileSize,
+          file_unique_id: fileUniqueId,
+          pixel_area: width * height,
+        };
       })
-      .filter((photo): photo is { file_id: string; file_size: number; file_unique_id: string } => Boolean(photo));
+      .filter(
+        (photo): photo is {
+          file_id: string;
+          file_size: number;
+          file_unique_id: string;
+          pixel_area: number;
+        } => Boolean(photo),
+      );
     if (!photos.length) {
       return null;
     }
-    const sorted = photos.sort((a, b) => a.file_size - b.file_size);
-    const target = sorted[0]!;
+    const photoScore = (photo: { file_size: number; pixel_area: number }) =>
+      photo.file_size > 0 ? photo.file_size : photo.pixel_area;
+    const target = photos.reduce((best, photo) =>
+      photoScore(photo) > photoScore(best) ? photo : best,
+    );
     const caption = normalizeContentPreview(message.caption ?? null);
     return {
       contentType: 'photo',
