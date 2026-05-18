@@ -554,6 +554,34 @@ export const createBot = (store: CardStore) => {
     }
   };
 
+  const replaceReminderKeyboard = async (
+    ctx: TelegrafContext,
+    job: { deliveryChatId: string | null; deliveryMessageId: number | null },
+    replyMarkup: InlineKeyboardMarkup,
+  ) => {
+    try {
+      await ctx.editMessageReplyMarkup(replyMarkup);
+      return true;
+    } catch (error) {
+      logger.warn('Не удалось заменить клавиатуру текущего напоминания', error);
+    }
+    if (!job.deliveryChatId || !job.deliveryMessageId) {
+      return false;
+    }
+    try {
+      await ctx.telegram.editMessageReplyMarkup(
+        job.deliveryChatId,
+        job.deliveryMessageId,
+        undefined,
+        replyMarkup,
+      );
+      return true;
+    } catch (error) {
+      logger.warn('Не удалось заменить клавиатуру доставленного напоминания', error);
+      return false;
+    }
+  };
+
   const restoreCustomScheduleMessage = async ({
     pending,
     text,
@@ -1953,14 +1981,11 @@ export const createBot = (store: CardStore) => {
                 reviewedAt: new Date().toISOString(),
               }),
             );
-            await clearReminderKeyboard(ctx, processedJob.job);
-            try {
-              await ctx.editMessageReplyMarkup(
-                buildReminderManagementKeyboard(processedJob.card.id).reply_markup,
-              );
-            } catch (_error) {
-              // keep user-facing action even if editing fails
-            }
+            await replaceReminderKeyboard(
+              ctx,
+              processedJob.job,
+              buildReminderManagementKeyboard(processedJob.card.id).reply_markup,
+            );
             await ctx.answerCbQuery(
               `Готово! Следующее повторение ${formatNextReviewMessage(result.nextReviewAt)}`,
             );
@@ -2003,14 +2028,11 @@ export const createBot = (store: CardStore) => {
             reviewedAt: new Date().toISOString(),
           }),
         );
-        await clearReminderKeyboard(ctx, job);
-        try {
-          await ctx.editMessageReplyMarkup(
-            buildReminderManagementKeyboard(card.id).reply_markup,
-          );
-        } catch (_error) {
-          // keep user-facing action even if editing fails
-        }
+        await replaceReminderKeyboard(
+          ctx,
+          job,
+          buildReminderManagementKeyboard(card.id).reply_markup,
+        );
         await ctx.answerCbQuery(
           `Готово! Следующее повторение ${formatNextReviewMessage(result.nextReviewAt)}`,
         );
