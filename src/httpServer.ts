@@ -14,14 +14,17 @@ import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
 import {
   BacklogItemStatus,
+  CardRecord,
   CardStatus,
   CardStore,
+  ReminderJobRecord,
   UserReminderSettings,
 } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import { ReminderRebalancePreviewChange } from './reminderRebalance';
 import { ReviewScheduler } from './reviewScheduler';
+import { computeReview } from './spacedRepetition';
 import { withDbRetry } from './utils/dbRetry';
 
 const publicDir = path.join(process.cwd(), 'public');
@@ -115,6 +118,29 @@ const parseRebalanceChanges = (body: unknown): ReminderRebalancePreviewChange[] 
     };
   });
 };
+
+const parseOptionalString = (value: unknown): string | null => {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+};
+
+const parseQueueDelayMinutes = (value: unknown, fallback: number) => {
+  const raw = typeof value === 'string' ? Number(value) : value;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return fallback;
+  return Math.min(60 * 24 * 30, Math.max(1, Math.floor(raw)));
+};
+
+const getHttpStatus = (error: unknown) => {
+  if (error && typeof error === 'object' && 'statusCode' in error) {
+    const value = Number((error as { statusCode?: unknown }).statusCode);
+    if (Number.isInteger(value) && value >= 400 && value <= 599) {
+      return value;
+    }
+  }
+  return 500;
+};
+
+const queueError = (statusCode: number, message: string) =>
+  Object.assign(new Error(message), { statusCode });
 
 export const createHttpServer = (
   store: CardStore,
@@ -319,6 +345,61 @@ export const createHttpServer = (
     next();
   };
 
+  const loadQueueActionContext = async (
+    userId: string,
+    cardId: string | undefined,
+    jobId?: string | null,
+  ): Promise<{ card: CardRecord; job: ReminderJobRecord | null }> => {
+    if (!cardId) {
+      throw queueError(400, 'Card ID required');
+    }
+
+    let card: CardRecord;
+    try {
+      card = await withDbRetry(() => store.getCardById(cardId));
+    } catch {
+      throw queueError(404, 'Карточка не найдена');
+    }
+    if (card.userId !== userId) {
+      throw queueError(403, 'Access denied');
+    }
+    if (card.status === 'pending') {
+      throw queueError(409, 'Карточка ещё не активирована');
+    }
+    if (card.status === 'archived') {
+      throw queueError(409, 'Карточка архивирована');
+    }
+
+    if (jobId) {
+      const found = await withDbRetry(() => store.getReminderJobWithCard(jobId));
+      if (!found || found.card.id !== cardId || found.card.userId !== userId) {
+        throw queueError(404, 'Напоминание не найдено');
+      }
+      if (found.job.status !== 'awaiting_action') {
+        throw queueError(409, 'Напоминание уже обработано');
+      }
+      return found;
+    }
+
+    const awaitingJob = await withDbRetry(() => store.findAwaitingReviewJobByCard(cardId));
+    if (awaitingJob) {
+      card = awaitingJob.card;
+      return {
+        card,
+        job: awaitingJob.job,
+      };
+    }
+
+    return { card, job: null };
+  };
+
+  const handleQueueActionError = (res: Response, label: string, error: unknown) => {
+    const message = error instanceof Error ? error.message : 'Не удалось выполнить действие';
+    const statusCode = getHttpStatus(error);
+    logger.error(label, error);
+    res.status(statusCode).json({ error: message });
+  };
+
   // Mini App public routes
   app.get('/miniapp', (_req, res) => {
     res.sendFile(path.join(publicDir, 'miniapp', 'index.html'));
@@ -334,6 +415,266 @@ export const createHttpServer = (
       },
     });
   });
+
+  app.get(
+    '/api/miniapp/queue',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const limit = parseLimit(req.query.limit, 20);
+      try {
+        const items = await withDbRetry(() =>
+          store.listReminderQueueByUser({ userId, limit }),
+        );
+        res.json({
+          data: {
+            items,
+            count: items.length,
+            next: items[0] ?? null,
+          },
+        });
+      } catch (error) {
+        logger.error('Error loading reminder queue for Mini App', error);
+        res.status(500).json({ error: 'Failed to load reminder queue' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/queue/cards/:id/viewed',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const cardId = req.params.id;
+      const jobId = parseOptionalString(req.body?.jobId);
+
+      try {
+        const { card, job } = await loadQueueActionContext(userId, cardId, jobId);
+
+        if (job?.kind === 'one_time') {
+          await withDbRetry(() => store.completeReminderJob(job.id));
+          res.json({
+            ok: true,
+            data: {
+              action: 'one_time_completed',
+              card,
+              job,
+            },
+          });
+          return;
+        }
+
+        const result = computeReview(card, 'ok');
+        await withDbRetry(() =>
+          store.saveReviewResult({
+            cardId: card.id,
+            jobId: job?.id ?? null,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
+        const updated = await withDbRetry(() => store.getCardById(card.id));
+        res.json({
+          ok: true,
+          data: {
+            action: 'viewed',
+            card: updated,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+          },
+        });
+      } catch (error) {
+        handleQueueActionError(res, 'Error marking queue card viewed', error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/queue/cards/:id/not-viewed',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const cardId = req.params.id;
+      const jobId = parseOptionalString(req.body?.jobId);
+
+      try {
+        const { card, job } = await loadQueueActionContext(userId, cardId, jobId);
+        if (card.status === 'awaiting_grade' || job?.status === 'awaiting_action') {
+          res.json({
+            ok: true,
+            data: {
+              action: 'kept_in_queue',
+              card,
+              job,
+            },
+          });
+          return;
+        }
+
+        const now = new Date().toISOString();
+        await withDbRetry(() => store.rescheduleCard(card.id, now));
+        const updated = await withDbRetry(() => store.getCardById(card.id));
+        res.json({
+          ok: true,
+          data: {
+            action: 'requeued_now',
+            card: updated,
+            nextReviewAt: now,
+          },
+        });
+      } catch (error) {
+        handleQueueActionError(res, 'Error returning queue card to stack', error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/queue/cards/:id/again',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const cardId = req.params.id;
+      const jobId = parseOptionalString(req.body?.jobId);
+
+      try {
+        const { card, job } = await loadQueueActionContext(userId, cardId, jobId);
+        if (job?.kind === 'one_time') {
+          const snoozedJob = await withDbRetry(() => store.snoozeReminderJob(job.id, 60));
+          res.json({
+            ok: true,
+            data: {
+              action: 'one_time_snoozed',
+              card,
+              job: snoozedJob,
+            },
+          });
+          return;
+        }
+
+        const result = computeReview(card, 'again');
+        await withDbRetry(() =>
+          store.saveReviewResult({
+            cardId: card.id,
+            jobId: job?.id ?? null,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+            reviewedAt: new Date().toISOString(),
+          }),
+        );
+        const updated = await withDbRetry(() => store.getCardById(card.id));
+        res.json({
+          ok: true,
+          data: {
+            action: 'again',
+            card: updated,
+            nextReviewAt: result.nextReviewAt,
+            repetition: result.repetition,
+          },
+        });
+      } catch (error) {
+        handleQueueActionError(res, 'Error marking queue card again', error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/queue/cards/:id/reschedule',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const cardId = req.params.id;
+      const jobId = parseOptionalString(req.body?.jobId);
+      const remindAt = parseOptionalString(req.body?.remindAt);
+      const minutes = parseQueueDelayMinutes(req.body?.minutes, 60);
+
+      if (remindAt && !isIsoDate(remindAt)) {
+        res.status(400).json({ error: 'Некорректная дата напоминания' });
+        return;
+      }
+
+      const nextReviewAt =
+        remindAt
+          ? remindAt
+          : dayjs().add(minutes, 'minute').toISOString();
+
+      if (new Date(nextReviewAt).getTime() <= Date.now()) {
+        res.status(400).json({ error: 'Дата напоминания должна быть в будущем' });
+        return;
+      }
+
+      try {
+        const { card, job } = await loadQueueActionContext(userId, cardId, jobId);
+        if (job?.kind === 'one_time') {
+          await withDbRetry(() => store.completeReminderJob(job.id));
+          const nextJob = await withDbRetry(() =>
+            store.createReminderJob({
+              cardId: card.id,
+              userId: card.userId,
+              kind: 'one_time',
+              dueAt: nextReviewAt,
+              source: 'miniapp_queue_reschedule',
+              snoozedFromJobId: job.id,
+            }),
+          );
+          res.json({
+            ok: true,
+            data: {
+              action: 'one_time_rescheduled',
+              card,
+              job: nextJob,
+              nextReviewAt,
+            },
+          });
+          return;
+        }
+
+        await withDbRetry(() => store.rescheduleCard(card.id, nextReviewAt));
+        const updated = await withDbRetry(() => store.getCardById(card.id));
+        res.json({
+          ok: true,
+          data: {
+            action: 'rescheduled',
+            card: updated,
+            nextReviewAt,
+          },
+        });
+      } catch (error) {
+        handleQueueActionError(res, 'Error rescheduling queue card', error);
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/queue/cards/:id/archive',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const cardId = req.params.id;
+      const jobId = parseOptionalString(req.body?.jobId);
+
+      try {
+        const { card } = await loadQueueActionContext(userId, cardId, jobId);
+        await withDbRetry(() => store.updateStatus(card.id, 'archived'));
+        const updated = await withDbRetry(() => store.getCardById(card.id));
+        res.json({
+          ok: true,
+          data: {
+            action: 'archived',
+            card: updated,
+          },
+        });
+      } catch (error) {
+        handleQueueActionError(res, 'Error archiving queue card', error);
+      }
+    },
+  );
 
   app.get('/api/miniapp/cards', requireMiniAppAuth, async (req, res) => {
     const userId = (req as any).userId;

@@ -149,6 +149,20 @@ export interface ReminderJobWithCard {
   card: CardRecord;
 }
 
+export type ReminderQueueItemKind =
+  | 'awaiting_review'
+  | 'one_time'
+  | 'scheduled_review';
+
+export interface ReminderQueueItem {
+  id: string;
+  kind: ReminderQueueItemKind;
+  card: CardRecord;
+  job: ReminderJobRecord | null;
+  availableAt: string | null;
+  isDue: boolean;
+}
+
 export interface CreateReminderJobInput {
   cardId: string;
   userId: string;
@@ -1020,6 +1034,120 @@ export class CardStore {
     return rows.map(rowToCard);
   }
 
+  async listReminderQueueByUser(params: { userId: string; limit?: number }): Promise<ReminderQueueItem[]> {
+    const limit = Math.min(100, Math.max(1, params.limit ?? 20));
+    const now = new Date().toISOString();
+    const items: ReminderQueueItem[] = [];
+
+    const { rows: activeRows } = await this.pool.query(
+      `
+      SELECT to_jsonb(reminder_jobs) AS job,
+             to_jsonb(cards) AS card
+      FROM reminder_jobs
+      JOIN cards ON cards.id = reminder_jobs.card_id
+      WHERE reminder_jobs.user_id = $1
+        AND reminder_jobs.status = 'awaiting_action'
+        AND cards.status IN ('learning', 'awaiting_grade')
+      ORDER BY reminder_jobs.sent_at ASC NULLS LAST,
+               reminder_jobs.updated_at ASC
+      LIMIT $2
+    `,
+      [params.userId, limit],
+    );
+    for (const row of activeRows) {
+      const job = rowToReminderJob(row.job);
+      const card = rowToCard(row.card);
+      items.push({
+        id: job.id,
+        kind: job.kind === 'one_time' ? 'one_time' : 'awaiting_review',
+        card,
+        job,
+        availableAt: job.sentAt ?? card.awaitingGradeSince ?? job.updatedAt,
+        isDue: true,
+      });
+    }
+
+    if (items.length < limit) {
+      const remaining = limit - items.length;
+      const { rows: orphanAwaitingRows } = await this.pool.query(
+        `
+        SELECT *
+        FROM cards
+        WHERE user_id = $1
+          AND status = 'awaiting_grade'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM reminder_jobs
+            WHERE reminder_jobs.card_id = cards.id
+              AND reminder_jobs.status = 'awaiting_action'
+          )
+        ORDER BY awaiting_grade_since ASC NULLS LAST,
+                 updated_at ASC
+        LIMIT $2
+      `,
+        [params.userId, remaining],
+      );
+      for (const row of orphanAwaitingRows) {
+        const card = rowToCard(row);
+        items.push({
+          id: card.id,
+          kind: 'awaiting_review',
+          card,
+          job: null,
+          availableAt: card.awaitingGradeSince ?? card.updatedAt,
+          isDue: true,
+        });
+      }
+    }
+
+    if (items.length < limit) {
+      const remaining = limit - items.length;
+      const { rows: scheduledRows } = await this.pool.query(
+        `
+        SELECT to_jsonb(cards) AS card,
+               to_jsonb(reminder_jobs) AS job
+        FROM cards
+        LEFT JOIN LATERAL (
+          SELECT *
+          FROM reminder_jobs
+          WHERE reminder_jobs.card_id = cards.id
+            AND reminder_jobs.kind = 'review'
+            AND reminder_jobs.status = 'pending'
+          ORDER BY reminder_jobs.scheduled_at ASC
+          LIMIT 1
+        ) reminder_jobs ON true
+        WHERE cards.user_id = $1
+          AND cards.status = 'learning'
+          AND cards.next_review_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM reminder_jobs active_jobs
+            WHERE active_jobs.card_id = cards.id
+              AND active_jobs.status IN ('sending', 'awaiting_action')
+          )
+        ORDER BY cards.next_review_at ASC
+        LIMIT $2
+      `,
+        [params.userId, remaining],
+      );
+      for (const row of scheduledRows) {
+        const card = rowToCard(row.card);
+        const job = row.job ? rowToReminderJob(row.job) : null;
+        const availableAt = job?.scheduledAt ?? card.nextReviewAt;
+        items.push({
+          id: job?.id ?? card.id,
+          kind: 'scheduled_review',
+          card,
+          job,
+          availableAt,
+          isDue: Boolean(availableAt && Date.parse(availableAt) <= Date.parse(now)),
+        });
+      }
+    }
+
+    return items;
+  }
+
   async listBacklogItems(params: ListBacklogItemsParams = {}): Promise<BacklogItemRecord[]> {
     const limit = params.limit ?? 100;
     if (params.status) {
@@ -1238,7 +1366,7 @@ export class CardStore {
           completed_at = $1,
           updated_at = $1
       WHERE id = $2
-        AND status = 'awaiting_grade'
+        AND status = 'awaiting_action'
     `,
       [now, jobId],
     );
@@ -1330,6 +1458,7 @@ export class CardStore {
   }
 
   async rescheduleCard(cardId: string, nextReviewAt: string): Promise<void> {
+    const now = new Date().toISOString();
     await this.pool.query(
       `
       UPDATE cards
@@ -1341,7 +1470,19 @@ export class CardStore {
           updated_at = $2
       WHERE id = $3
     `,
-      [nextReviewAt, new Date().toISOString(), cardId],
+      [nextReviewAt, now, cardId],
+    );
+    await this.pool.query(
+      `
+      UPDATE reminder_jobs
+      SET status = 'cancelled',
+          completed_at = $1,
+          updated_at = $1
+      WHERE card_id = $2
+        AND kind IN ('review', 'manual_now')
+        AND status IN ('pending', 'sending', 'awaiting_action')
+    `,
+      [now, cardId],
     );
     const card = await this.getCardById(cardId);
     await this.createReminderJob({
