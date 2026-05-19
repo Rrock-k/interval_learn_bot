@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { Fragment, useEffect, useRef, useState, useMemo, type CSSProperties } from 'react';
 import {
   Archive,
   BarChart3,
@@ -10,6 +10,7 @@ import {
   Clock3,
   Copy,
   Link2,
+  MoreHorizontal,
   RotateCcw,
   Search,
 } from 'lucide-react';
@@ -39,7 +40,7 @@ import { cn } from './lib/utils';
 import { buildMessageLink, getMessageLink } from './linkUtils';
 
 type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
-type ViewName = 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
+type ViewName = 'queue' | 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
 type SortMode = 'nextReviewAsc' | 'nextReviewDesc' | 'updatedDesc' | 'repetitionDesc';
 type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
 
@@ -126,6 +127,29 @@ type RebalancePreview = {
   };
   changes: RebalanceChange[];
 };
+
+type ReminderJobRecord = {
+  id: string;
+  cardId: string;
+  userId: string;
+  kind: 'review' | 'one_time' | 'manual_now';
+  status: 'pending' | 'sending' | 'awaiting_action' | 'completed' | 'snoozed' | 'cancelled' | 'failed';
+  dueAt: string;
+  scheduledAt: string;
+  sentAt: string | null;
+  completedAt: string | null;
+};
+
+type ReminderQueueItem = {
+  id: string;
+  kind: 'awaiting_review' | 'one_time' | 'scheduled_review';
+  card: CardRecord;
+  job: ReminderJobRecord | null;
+  availableAt: string | null;
+  isDue: boolean;
+};
+
+type QueueAction = 'viewed' | 'not-viewed' | 'again' | 'reschedule' | 'archive';
 
 type TelegramWebApp = {
   initData: string;
@@ -353,8 +377,11 @@ async function copyText(value: string) {
 }
 
 export function App() {
-  const [view, setView] = useState<ViewName>('cards');
+  const [view, setView] = useState<ViewName>('queue');
   const [cards, setCards] = useState<CardRecord[]>([]);
+  const [queueItems, setQueueItems] = useState<ReminderQueueItem[]>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
   const [profile, setProfile] = useState<MiniAppProfile | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
@@ -373,6 +400,7 @@ export function App() {
   const [confirm, setConfirm] = useState<null | { title: string; body: string; label: string; danger?: boolean; action: () => Promise<void> }>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const demo = isDemoMode();
+  const ownerToolsAvailable = demo || profile?.ownerTools === true || profile === null;
   const screenTitle =
     view === 'card-detail'
       ? 'Карточка'
@@ -382,11 +410,15 @@ export function App() {
           ? 'Распределение'
         : view === 'calendar'
           ? 'Календарь'
-          : view === 'stats'
+        : view === 'stats'
             ? 'Статистика'
-            : 'Мои карточки';
+            : view === 'queue'
+              ? 'Очередь'
+              : 'Мои карточки';
   const screenSubtitle =
-    view === 'calendar'
+    view === 'queue'
+      ? 'Потяните следующую карточку, когда готовы посмотреть.'
+      : view === 'calendar'
       ? 'Ближайшие повторения по дням.'
       : view === 'stats'
         ? 'Короткая сводка по прогрессу.'
@@ -430,6 +462,20 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadQueue = async () => {
+    if (!ownerToolsAvailable) return;
+    setQueueLoading(true);
+    setQueueError(null);
+    try {
+      const result = await apiCall<{ data: { items: ReminderQueueItem[] } }>('/api/miniapp/queue?limit=20');
+      setQueueItems(result.data.items || []);
+    } catch (err) {
+      setQueueError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQueueLoading(false);
     }
   };
 
@@ -490,7 +536,7 @@ export function App() {
       setSelectedCardId(deepLink.cardId);
       setView('notification-detail');
     }
-    if (deepLink.type === 'view' && ['cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
+    if (deepLink.type === 'view' && ['queue', 'cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
       setView(deepLink.view);
     }
   }, [loading, cards.length]);
@@ -503,10 +549,16 @@ export function App() {
   }, [view]);
 
   useEffect(() => {
-    if (view === 'balance' && profile && !profile.ownerTools) {
+    if ((view === 'balance' || view === 'queue') && profile && !profile.ownerTools) {
       setView('cards');
     }
   }, [profile, view]);
+
+  useEffect(() => {
+    if (view === 'queue' && ownerToolsAvailable) {
+      void loadQueue();
+    }
+  }, [view, profile?.ownerTools]);
 
   const visibleCards = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -654,6 +706,34 @@ export function App() {
     }
   };
 
+  const runQueueAction = async (
+    item: ReminderQueueItem,
+    action: QueueAction,
+    payload: Record<string, unknown> = {},
+  ) => {
+    const busy = `queue:${action}:${item.card.id}`;
+    setBusyKey(busy);
+    try {
+      await apiCall(`/api/miniapp/queue/cards/${item.card.id}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          jobId: item.job?.id,
+          ...payload,
+        }),
+      });
+      if (action === 'viewed') {
+        setQueueItems((items) => items.filter((entry) => entry.id !== item.id));
+      }
+      if (action !== 'not-viewed') {
+        tg.HapticFeedback?.notificationOccurred?.('success');
+      }
+      await loadQueue();
+      await loadCards('all');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const runConfirm = async () => {
     if (!confirm) return;
     const action = confirm.action;
@@ -677,16 +757,32 @@ export function App() {
 
       {view !== 'card-detail' && view !== 'notification-detail' ? (
         <Tabs value={view} onValueChange={(value) => setView(value as ViewName)} className="app-tabs">
-          <TabsList className={profile?.ownerTools ? 'tabs-count-4' : undefined}>
+          <TabsList className={ownerToolsAvailable ? 'tabs-count-5' : undefined}>
+            {ownerToolsAvailable ? <TabsTrigger value="queue">Очередь</TabsTrigger> : null}
             <TabsTrigger value="cards">Карточки</TabsTrigger>
             <TabsTrigger value="calendar">Календарь</TabsTrigger>
             <TabsTrigger value="stats">Статистика</TabsTrigger>
-            {profile?.ownerTools ? <TabsTrigger value="balance">Баланс</TabsTrigger> : null}
+            {ownerToolsAvailable ? <TabsTrigger value="balance">Баланс</TabsTrigger> : null}
           </TabsList>
         </Tabs>
       ) : null}
 
       <main className="app-main" key={view}>
+        {view === 'queue' && ownerToolsAvailable ? (
+          <QueueScreen
+            items={queueItems}
+            loading={queueLoading}
+            error={queueError}
+            busyKey={busyKey}
+            onReload={loadQueue}
+            onAction={runQueueAction}
+            onOpen={(card) => {
+              setSelectedCardId(card.id);
+              setView('card-detail');
+            }}
+          />
+        ) : null}
+
         {view === 'cards' ? (
           <CardsScreen
             cards={visibleCards}
@@ -772,6 +868,305 @@ export function App() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+const QUEUE_PULL_THRESHOLD = 0.45;
+
+function QueueScreen({
+  items,
+  loading,
+  error,
+  busyKey,
+  onReload,
+  onAction,
+  onOpen,
+}: {
+  items: ReminderQueueItem[];
+  loading: boolean;
+  error: string | null;
+  busyKey: string | null;
+  onReload: () => Promise<void>;
+  onAction: (item: ReminderQueueItem, action: QueueAction, payload?: Record<string, unknown>) => Promise<void>;
+  onOpen: (card: CardRecord) => void;
+}) {
+  const [progress, setProgress] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [viewedItem, setViewedItem] = useState<ReminderQueueItem | null>(null);
+  const [settling, setSettling] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<null | {
+    startX: number;
+    startY: number;
+    startProgress: number;
+    fullDrag: number;
+    pointerId: number;
+    mode: 'h' | 'v' | null;
+  }>(null);
+  const nextItem = items.find((item) => item.id !== viewedItem?.id) ?? null;
+  const activePullItem = nextItem;
+  const queueBusy = Boolean(busyKey?.startsWith('queue:'));
+
+  const settleTo = (value: number) => {
+    setSettling(true);
+    setProgress(value);
+    window.setTimeout(() => setSettling(false), 220);
+  };
+
+  const completePull = async (item: ReminderQueueItem) => {
+    setMenuOpen(false);
+    settleTo(1);
+    window.setTimeout(() => {
+      setViewedItem(item);
+      setProgress(0);
+    }, 180);
+    try {
+      await onAction(item, 'viewed');
+    } catch (err) {
+      setViewedItem(null);
+      showAlert(err instanceof Error ? err.message : 'Не удалось отметить просмотр');
+    }
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!activePullItem || queueBusy || menuOpen) return;
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    dragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startProgress: progress,
+      fullDrag: Math.max(180, rect.width * 0.72),
+      pointerId: event.pointerId,
+      mode: null,
+    };
+    setSettling(false);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // noop
+    }
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (drag.mode === null) {
+      const magnitude = Math.hypot(dx, dy);
+      if (magnitude < 6) return;
+      drag.mode = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+    }
+    if (drag.mode !== 'h') return;
+    const raw = drag.startProgress + (-dx / drag.fullDrag);
+    const rubber = raw < 0 ? raw * 0.25 : raw > 1 ? 1 + (raw - 1) * 0.18 : raw;
+    setProgress(Math.max(-0.06, Math.min(1.08, rubber)));
+  };
+
+  const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag) return;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // noop
+    }
+    if (drag.mode !== 'h') return;
+    if (progress >= QUEUE_PULL_THRESHOLD && activePullItem) {
+      void completePull(activePullItem);
+    } else {
+      settleTo(0);
+    }
+  };
+
+  const menuAction = async (action: QueueAction, payload: Record<string, unknown> = {}) => {
+    if (!viewedItem) return;
+    try {
+      if (action === 'archive') {
+        await onAction(viewedItem, action, payload);
+        setViewedItem(null);
+      } else if (action === 'not-viewed') {
+        await onAction(viewedItem, action, payload);
+        setViewedItem(null);
+      } else if (action === 'reschedule' || action === 'again') {
+        await onAction(viewedItem, action, payload);
+        setViewedItem(null);
+      }
+      setMenuOpen(false);
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : 'Не удалось выполнить действие');
+    }
+  };
+
+  if (error) {
+    return <StateBlock title="Не удалось загрузить очередь" body={error} />;
+  }
+
+  return (
+    <div className="queue-screen">
+      <div className="queue-topline">
+        <Badge tone="muted">{loading ? 'Обновление' : `${items.length}${viewedItem ? '+1' : ''}`}</Badge>
+        <Button variant="ghost" size="icon" aria-label="Обновить очередь" disabled={loading} onClick={() => void onReload()}>
+          <RotateCcw size={16} />
+        </Button>
+      </div>
+
+      <div
+        ref={stageRef}
+        className={cn('queue-live-stage', settling && 'is-settling')}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onClick={() => menuOpen && setMenuOpen(false)}
+      >
+        {!viewedItem && !nextItem && !loading ? (
+          <div className="queue-empty">
+            <CheckCircle2 size={36} />
+            <span>Очередь пуста</span>
+          </div>
+        ) : null}
+
+        {viewedItem ? (
+          <div
+            className="queue-card-shell queue-card-current"
+            style={{ '--queue-x': `${-progress * 108}%` } as CSSProperties}
+          >
+            <QueueReminderCard
+              item={viewedItem}
+              viewed
+              menuOpen={menuOpen}
+              onMenu={() => setMenuOpen((value) => !value)}
+            />
+          </div>
+        ) : null}
+
+        {nextItem ? (
+          <div
+            className="queue-card-shell queue-card-next"
+            style={{ '--queue-x': `${94 - progress * 94}%` } as CSSProperties}
+          >
+            <QueueReminderCard
+              item={nextItem}
+              ghost={progress < 0.08}
+              contentOpacity={Math.max(0, Math.min(1, (progress - 0.08) / 0.32))}
+            />
+          </div>
+        ) : null}
+
+        {nextItem ? <QueueProgressSpring progress={progress} /> : null}
+
+        {progress >= QUEUE_PULL_THRESHOLD && nextItem ? (
+          <div className="queue-release-label">Отпусти, чтобы просмотреть</div>
+        ) : null}
+
+        {menuOpen && viewedItem ? (
+          <div className="queue-menu" onClick={(event) => event.stopPropagation()}>
+            <button type="button" disabled={queueBusy} onClick={() => void menuAction('not-viewed')}>Не просмотрено</button>
+            <button type="button" disabled={queueBusy} onClick={() => void menuAction('reschedule', { minutes: 60 })}>Перенести</button>
+            <button type="button" disabled={queueBusy} onClick={() => void menuAction('again')}>Снова</button>
+            <button type="button" disabled={queueBusy} onClick={() => void menuAction('archive')}>Архив</button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpen(viewedItem.card);
+              }}
+            >
+              Открыть детали
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function QueueProgressSpring({ progress }: { progress: number }) {
+  const radius = 22;
+  const circumference = 2 * Math.PI * radius;
+  const filled = Math.max(0, Math.min(1, progress / QUEUE_PULL_THRESHOLD));
+  const past = progress >= QUEUE_PULL_THRESHOLD;
+  return (
+    <div
+      className={cn('queue-progress-spring', past && 'is-ready')}
+      style={{
+        opacity: Math.max(0, Math.min(1, (progress - 0.02) * 9)),
+        transform: `translate(-50%, -50%) scale(${0.78 + 0.22 * filled + (past ? 0.06 : 0)})`,
+      }}
+    >
+      <svg width="56" height="56" viewBox="0 0 56 56">
+        <circle cx="28" cy="28" r={radius} fill="none" stroke="rgba(255,255,255,.14)" strokeWidth="3" />
+        <circle
+          cx="28"
+          cy="28"
+          r={radius}
+          fill="none"
+          stroke={past ? '#f3f3ef' : '#b8c4d8'}
+          strokeWidth={past ? 3.5 : 3}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - filled)}
+          transform="rotate(-90 28 28)"
+        />
+      </svg>
+    </div>
+  );
+}
+
+function QueueReminderCard({
+  item,
+  viewed = false,
+  ghost = false,
+  menuOpen = false,
+  contentOpacity = 1,
+  onMenu,
+}: {
+  item: ReminderQueueItem;
+  viewed?: boolean;
+  ghost?: boolean;
+  menuOpen?: boolean;
+  contentOpacity?: number;
+  onMenu?: () => void;
+}) {
+  const label =
+    item.kind === 'one_time'
+      ? 'Одноразовое'
+      : item.kind === 'scheduled_review'
+        ? 'Дальше'
+        : 'К оценке';
+  return (
+    <Card
+      className={cn('queue-reminder-card', ghost && 'is-ghost')}
+      style={{ '--queue-content-opacity': contentOpacity } as CSSProperties}
+    >
+      <div className="queue-card-header">
+        <div>
+          <Badge tone={item.isDue ? 'inverse' : 'muted'}>{label}</Badge>
+          <span>{formatDateShort(item.availableAt || item.card.nextReviewAt)}</span>
+        </div>
+        {viewed ? (
+          <button
+            type="button"
+            className={cn('queue-kebab', menuOpen && 'is-open')}
+            aria-label="Действия"
+            onClick={(event) => {
+              event.stopPropagation();
+              onMenu?.();
+            }}
+          >
+            <MoreHorizontal size={18} />
+          </button>
+        ) : null}
+      </div>
+      <p>{item.card.contentPreview || 'Без текста'}</p>
+      <div className="queue-card-footer">
+        <span>{item.card.contentType}</span>
+        <span>Повторы {item.card.repetition || 0}</span>
+      </div>
+    </Card>
   );
 }
 
@@ -1433,6 +1828,11 @@ async function copyAndNotify(value: string, message: string) {
 async function demoResponse<T>(endpoint: string, options: RequestInit, cards: CardRecord[], setCards: React.Dispatch<React.SetStateAction<CardRecord[]>>) {
   const source = cards.length ? cards : demoCards;
   if (endpoint.includes('/me')) return { data: { userId: 'demo', ownerTools: true } } as T;
+  if (endpoint.includes('/queue/cards/')) return { ok: true } as T;
+  if (endpoint.includes('/queue')) {
+    const items = buildDemoQueueItems(source);
+    return { data: { items, count: items.length, next: items[0] ?? null } } as T;
+  }
   if (endpoint.includes('/stats')) return { data: buildStats(source) } as T;
   if (endpoint.includes('/settings/reminders')) {
     if (options.method === 'POST' && typeof options.body === 'string') {
@@ -1452,6 +1852,32 @@ async function demoResponse<T>(endpoint: string, options: RequestInit, cards: Ca
   const data = statusMatch ? source.filter((card) => card.status === statusMatch[1]) : source;
   if (!cards.length) setCards(source);
   return { data } as T;
+}
+
+function buildDemoQueueItems(cards: CardRecord[]): ReminderQueueItem[] {
+  return cards
+    .filter((card) => card.status === 'awaiting_grade' || card.status === 'learning')
+    .slice(0, 6)
+    .map((card, index) => ({
+      id: `demo-queue-${card.id}`,
+      kind: card.status === 'awaiting_grade' ? 'awaiting_review' : 'scheduled_review',
+      card,
+      job: card.status === 'awaiting_grade'
+        ? {
+          id: `demo-job-${card.id}`,
+          cardId: card.id,
+          userId: card.userId ?? 'demo',
+          kind: 'review',
+          status: 'awaiting_action',
+          dueAt: card.nextReviewAt ?? new Date().toISOString(),
+          scheduledAt: card.nextReviewAt ?? new Date().toISOString(),
+          sentAt: card.awaitingGradeSince,
+          completedAt: null,
+        }
+        : null,
+      availableAt: card.awaitingGradeSince ?? card.nextReviewAt ?? card.updatedAt,
+      isDue: index === 0 || card.status === 'awaiting_grade',
+    }));
 }
 
 function buildDemoRebalancePreview(horizonDays: number, bucketMinutes: number): RebalancePreview {
