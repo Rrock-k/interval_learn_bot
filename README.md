@@ -99,6 +99,8 @@ railway logs
 - `npm run dev` — запуск в режиме разработки (hot reload).
 - `npm run lint` — проверка типов TypeScript.
 - `npm run build` — компиляция в `dist/`.
+- `npm run authoring:dev` — отдельный dev-сервер LLM authoring UI; `/api/*` проксируется в основной Express-сервер на `http://127.0.0.1:3000` или `AUTHORING_API_PROXY_TARGET`.
+- `npm run authoring:build` — сборка LLM authoring UI в `public/course-authoring`.
 - `npm start` — запуск продакшн-сборки.
 
 ## Дополнительно

@@ -322,13 +322,21 @@ function CourseDraftPanel({
 }
 
 async function apiPost<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new Error('Не удалось подключиться к API создания курса. Обновите страницу или откройте /courses/author через основной сервер приложения.');
+  }
   const payload = await response.json().catch(() => null) as { error?: string } | null;
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('Сессия истекла. Войдите снова через личный кабинет.');
+    }
     throw new Error(payload?.error ?? `Request failed: ${response.status}`);
   }
   return payload as T;
