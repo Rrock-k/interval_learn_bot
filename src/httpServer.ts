@@ -18,9 +18,11 @@ import {
   CardRecord,
   CardStatus,
   CardStore,
+  CourseCadence,
   ReminderJobRecord,
   UserReminderSettings,
 } from './db';
+import { CourseStepKind } from './courses';
 import { config } from './config';
 import { logger } from './logger';
 import { ReminderRebalancePreviewChange } from './reminderRebalance';
@@ -127,6 +129,32 @@ const parseRebalanceChanges = (body: unknown): ReminderRebalancePreviewChange[] 
 
 const parseOptionalString = (value: unknown): string | null => {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+};
+
+const allowedCourseStepKinds: CourseStepKind[] = ['material', 'practice', 'question'];
+const allowedCourseCadences: CourseCadence[] = ['after_view', 'daily'];
+
+const parseCoursePayload = (body: unknown) => {
+  if (!body || typeof body !== 'object') return null;
+  const input = body as Record<string, unknown>;
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  const description = typeof input.description === 'string' ? input.description.trim() : null;
+  const rawSteps = Array.isArray(input.steps) ? input.steps : [];
+  const steps = rawSteps
+    .map((entry) => {
+      const step = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
+      const kind = allowedCourseStepKinds.includes(step.kind as CourseStepKind)
+        ? (step.kind as CourseStepKind)
+        : 'material';
+      const stepTitle = typeof step.title === 'string' ? step.title.trim() : '';
+      const body = typeof step.body === 'string' ? step.body.trim() : '';
+      return { kind, title: stepTitle, body };
+    })
+    .filter((step) => step.title && step.body);
+  if (!title || steps.length === 0 || steps.length > 100) {
+    return null;
+  }
+  return { title, description, steps };
 };
 
 const parseQueueDelayMinutes = (value: unknown, fallback: number) => {
@@ -421,6 +449,91 @@ export const createHttpServer = (
       },
     });
   });
+
+  app.get(
+    '/api/miniapp/courses',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      try {
+        const courses = await withDbRetry(() => store.listCourseSummariesByOwner(userId));
+        res.json({ data: courses });
+      } catch (error) {
+        logger.error('Error loading Mini App courses', error);
+        res.status(500).json({ error: 'Failed to load courses' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/courses',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const payload = parseCoursePayload(req.body);
+      if (!payload) {
+        res.status(400).json({ error: 'Invalid course payload' });
+        return;
+      }
+      try {
+        const result = await withDbRetry(() =>
+          store.createCourseWithSteps({
+            ownerUserId: userId,
+            title: payload.title,
+            description: payload.description,
+            steps: payload.steps,
+          }),
+        );
+        res.json({ data: result });
+      } catch (error) {
+        logger.error('Error creating Mini App course', error);
+        res.status(500).json({ error: 'Failed to create course' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/miniapp/courses/:id/start',
+    requireMiniAppAuth,
+    requireMiniAppOwner,
+    async (req, res) => {
+      const userId = (req as any).userId;
+      const courseId = req.params.id;
+      if (!courseId) {
+        res.status(400).json({ error: 'Course id is required' });
+        return;
+      }
+      const requestedCadence = typeof req.body?.cadence === 'string' ? req.body.cadence : '';
+      const cadence = allowedCourseCadences.includes(requestedCadence as CourseCadence)
+        ? (requestedCadence as CourseCadence)
+        : 'after_view';
+      try {
+        const course = await withDbRetry(() => store.findCourseById(courseId));
+        if (!course) {
+          res.status(404).json({ error: 'Course not found' });
+          return;
+        }
+        if (course.ownerUserId !== userId || course.status === 'archived') {
+          res.status(404).json({ error: 'Course not found' });
+          return;
+        }
+        const result = await withDbRetry(() =>
+          store.startCourseEnrollment({
+            courseId,
+            userId,
+            queueScope: buildUserQueueScope(userId),
+            cadence,
+          }),
+        );
+        res.json({ data: result });
+      } catch (error) {
+        logger.error('Error starting Mini App course', error);
+        res.status(500).json({ error: 'Failed to start course' });
+      }
+    },
+  );
 
   app.get(
     '/api/miniapp/queue',

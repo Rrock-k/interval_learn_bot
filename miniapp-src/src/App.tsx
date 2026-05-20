@@ -3,6 +3,7 @@ import {
   Archive,
   BarChart3,
   Bell,
+  BookOpen,
   CalendarDays,
   CheckCircle2,
   ChevronLeft,
@@ -11,6 +12,8 @@ import {
   Copy,
   Link2,
   MoreHorizontal,
+  Play,
+  Plus,
   RotateCcw,
   Search,
 } from 'lucide-react';
@@ -40,7 +43,7 @@ import { cn } from './lib/utils';
 import { buildMessageLink, getMessageLink } from './linkUtils';
 
 type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
-type ViewName = 'queue' | 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
+type ViewName = 'queue' | 'courses' | 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
 type SortMode = 'nextReviewAsc' | 'nextReviewDesc' | 'updatedDesc' | 'repetitionDesc';
 type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
 
@@ -150,6 +153,27 @@ type ReminderQueueItem = {
 };
 
 type QueueAction = 'viewed' | 'not-viewed' | 'again' | 'reschedule' | 'archive';
+
+type CourseStepKind = 'material' | 'practice' | 'question';
+
+type CourseSummary = {
+  id: string;
+  ownerUserId: string;
+  title: string;
+  description: string | null;
+  status: 'draft' | 'active' | 'archived';
+  stepCount: number;
+  activeEnrollmentCount: number;
+  completedEnrollmentCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CourseStepDraft = {
+  kind: CourseStepKind;
+  title: string;
+  body: string;
+};
 
 type TelegramWebApp = {
   initData: string;
@@ -273,6 +297,21 @@ const demoReminderSettings: ReminderSettings = {
   minGapMinutes: 30,
 };
 
+const demoCourses: CourseSummary[] = [
+  {
+    id: 'demo-course-sql',
+    ownerUserId: 'demo',
+    title: 'Основы SQL',
+    description: 'Короткий курс из практических шагов.',
+    status: 'active',
+    stepCount: 4,
+    activeEnrollmentCount: 0,
+    completedEnrollmentCount: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
 const isDemoMode = () => new URLSearchParams(window.location.search).has('demo');
 
 const showAlert = (message: string) => tg.showAlert?.(message) || window.alert(message);
@@ -382,6 +421,9 @@ export function App() {
   const [queueItems, setQueueItems] = useState<ReminderQueueItem[]>([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
+  const [courses, setCourses] = useState<CourseSummary[]>([]);
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const [coursesError, setCoursesError] = useState<string | null>(null);
   const [profile, setProfile] = useState<MiniAppProfile | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
@@ -408,6 +450,8 @@ export function App() {
         ? 'Уведомление'
         : view === 'balance'
           ? 'Распределение'
+        : view === 'courses'
+          ? 'Курсы'
         : view === 'calendar'
           ? 'Календарь'
         : view === 'stats'
@@ -418,6 +462,8 @@ export function App() {
   const screenSubtitle =
     view === 'queue'
       ? 'Потяните следующую карточку, когда готовы посмотреть.'
+      : view === 'courses'
+        ? 'Создайте простой курс и запустите шаги в очередь.'
       : view === 'calendar'
       ? 'Ближайшие повторения по дням.'
       : view === 'stats'
@@ -440,7 +486,7 @@ export function App() {
 
   const apiCall = async <T,>(endpoint: string, options: RequestInit = {}): Promise<T> => {
     if (demo) {
-      return demoResponse<T>(endpoint, options, cards, setCards);
+      return demoResponse<T>(endpoint, options, cards, setCards, courses, setCourses);
     }
     if (!tg.initData) throw new Error('Telegram initData не доступен. Откройте приложение через бота.');
     const response = await fetch(`${window.location.origin}${endpoint}`, {
@@ -476,6 +522,20 @@ export function App() {
       setQueueError(err instanceof Error ? err.message : String(err));
     } finally {
       setQueueLoading(false);
+    }
+  };
+
+  const loadCourses = async () => {
+    if (!ownerToolsAvailable) return;
+    setCoursesLoading(true);
+    setCoursesError(null);
+    try {
+      const result = await apiCall<{ data: CourseSummary[] }>('/api/miniapp/courses');
+      setCourses(result.data || []);
+    } catch (err) {
+      setCoursesError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCoursesLoading(false);
     }
   };
 
@@ -536,7 +596,7 @@ export function App() {
       setSelectedCardId(deepLink.cardId);
       setView('notification-detail');
     }
-    if (deepLink.type === 'view' && ['queue', 'cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
+    if (deepLink.type === 'view' && ['queue', 'courses', 'cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
       setView(deepLink.view);
     }
   }, [loading, cards.length]);
@@ -549,7 +609,7 @@ export function App() {
   }, [view]);
 
   useEffect(() => {
-    if ((view === 'balance' || view === 'queue') && profile && !profile.ownerTools) {
+    if ((view === 'balance' || view === 'queue' || view === 'courses') && profile && !profile.ownerTools) {
       setView('cards');
     }
   }, [profile, view]);
@@ -557,6 +617,12 @@ export function App() {
   useEffect(() => {
     if (view === 'queue' && ownerToolsAvailable) {
       void loadQueue();
+    }
+  }, [view, profile?.ownerTools]);
+
+  useEffect(() => {
+    if (view === 'courses' && ownerToolsAvailable) {
+      void loadCourses();
     }
   }, [view, profile?.ownerTools]);
 
@@ -734,6 +800,37 @@ export function App() {
     }
   };
 
+  const createCourse = async (input: { title: string; description: string | null; steps: CourseStepDraft[] }) => {
+    setBusyKey('course:create');
+    try {
+      await apiCall('/api/miniapp/courses', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      showAlert('Курс создан');
+      await loadCourses();
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const startCourse = async (course: CourseSummary) => {
+    setBusyKey(`course:start:${course.id}`);
+    try {
+      await apiCall(`/api/miniapp/courses/${course.id}/start`, {
+        method: 'POST',
+        body: JSON.stringify({ cadence: 'after_view' }),
+      });
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      showAlert('Первый шаг добавлен в очередь');
+      await loadCourses();
+      await loadQueue();
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const runConfirm = async () => {
     if (!confirm) return;
     const action = confirm.action;
@@ -757,8 +854,9 @@ export function App() {
 
       {view !== 'card-detail' && view !== 'notification-detail' ? (
         <Tabs value={view} onValueChange={(value) => setView(value as ViewName)} className="app-tabs">
-          <TabsList className={ownerToolsAvailable ? 'tabs-count-5' : undefined}>
+          <TabsList className={ownerToolsAvailable ? 'tabs-count-6' : undefined}>
             {ownerToolsAvailable ? <TabsTrigger value="queue">Очередь</TabsTrigger> : null}
+            {ownerToolsAvailable ? <TabsTrigger value="courses">Курсы</TabsTrigger> : null}
             <TabsTrigger value="cards">Карточки</TabsTrigger>
             <TabsTrigger value="calendar">Календарь</TabsTrigger>
             <TabsTrigger value="stats">Статистика</TabsTrigger>
@@ -780,6 +878,18 @@ export function App() {
               setSelectedCardId(card.id);
               setView('card-detail');
             }}
+          />
+        ) : null}
+
+        {view === 'courses' && ownerToolsAvailable ? (
+          <CoursesScreen
+            courses={courses}
+            loading={coursesLoading}
+            error={coursesError}
+            busyKey={busyKey}
+            onCreate={createCourse}
+            onStart={startCourse}
+            onReload={loadCourses}
           />
         ) : null}
 
@@ -872,6 +982,122 @@ export function App() {
 }
 
 const QUEUE_PULL_THRESHOLD = 0.45;
+
+function CoursesScreen({
+  courses,
+  loading,
+  error,
+  busyKey,
+  onCreate,
+  onStart,
+  onReload,
+}: {
+  courses: CourseSummary[];
+  loading: boolean;
+  error: string | null;
+  busyKey: string | null;
+  onCreate: (input: { title: string; description: string | null; steps: CourseStepDraft[] }) => Promise<void>;
+  onStart: (course: CourseSummary) => Promise<void>;
+  onReload: () => Promise<void>;
+}) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [stepsText, setStepsText] = useState('');
+  const parsedSteps = useMemo(() => parseCourseStepsDraft(stepsText), [stepsText]);
+  const creating = busyKey === 'course:create';
+  const canCreate = title.trim().length > 0 && parsedSteps.length > 0;
+
+  const submit = async () => {
+    if (!canCreate) {
+      showAlert('Добавьте название и хотя бы один шаг');
+      return;
+    }
+    try {
+      await onCreate({
+        title: title.trim(),
+        description: description.trim() || null,
+        steps: parsedSteps,
+      });
+      setTitle('');
+      setDescription('');
+      setStepsText('');
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : 'Не удалось создать курс');
+    }
+  };
+
+  return (
+    <div className="courses-stack">
+      <Card className="course-editor">
+        <div className="settings-heading">
+          <div>
+            <h2>Новый курс</h2>
+            <p>Каждый блок станет отдельным шагом очереди.</p>
+          </div>
+          <BookOpen size={20} />
+        </div>
+        <label className="settings-field">
+          <span>Название</span>
+          <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Основы SQL" />
+        </label>
+        <label className="settings-field">
+          <span>Описание</span>
+          <Input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Коротко, чему учимся" />
+        </label>
+        <label className="settings-field">
+          <span>Шаги</span>
+          <textarea
+            className="ui-textarea"
+            value={stepsText}
+            onChange={(event) => setStepsText(event.target.value)}
+            placeholder={'JOIN руками\nСоберите запрос с INNER JOIN на двух таблицах.\n\nGROUP BY\nСгруппируйте продажи по дням.'}
+          />
+        </label>
+        <div className="course-editor-footer">
+          <Badge tone="muted">{parsedSteps.length} шагов</Badge>
+          <Button disabled={creating || !canCreate} onClick={() => void submit()}>
+            <Plus size={16} />
+            Создать
+          </Button>
+        </div>
+      </Card>
+
+      <div className="queue-topline">
+        <Badge tone="muted">{loading ? 'Обновление' : `${courses.length} курсов`}</Badge>
+        <Button variant="ghost" size="icon" aria-label="Обновить курсы" disabled={loading} onClick={() => void onReload()}>
+          <RotateCcw size={16} />
+        </Button>
+      </div>
+
+      {error ? <StateBlock title="Не удалось загрузить курсы" body={error} /> : null}
+      {!error && !loading && courses.length === 0 ? <StateBlock title="Курсов пока нет" body="Создайте первый простой курс из нескольких шагов." /> : null}
+
+      {courses.map((course) => {
+        const starting = busyKey === `course:start:${course.id}`;
+        const started = course.activeEnrollmentCount > 0;
+        return (
+          <Card className="course-row" key={course.id}>
+            <div className="course-row-main">
+              <div>
+                <h2>{course.title}</h2>
+                {course.description ? <p>{course.description}</p> : null}
+              </div>
+              <Badge tone={started ? 'inverse' : 'muted'}>{started ? 'В очереди' : course.status}</Badge>
+            </div>
+            <div className="course-row-meta">
+              <span>{course.stepCount} шагов</span>
+              <span>запусков {course.activeEnrollmentCount + course.completedEnrollmentCount}</span>
+            </div>
+            <Button variant="outline" disabled={starting || course.stepCount === 0} onClick={() => void onStart(course)}>
+              <Play size={16} />
+              {started ? 'Запустить ещё раз' : 'Запустить'}
+            </Button>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
 
 function QueueScreen({
   items,
@@ -1755,6 +1981,25 @@ function maxMatrix(matrix: number[][]) {
   return matrix.reduce((max, row) => Math.max(max, ...row), 0);
 }
 
+function parseCourseStepsDraft(value: string): CourseStepDraft[] {
+  return value
+    .split(/\n\s*\n/g)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => {
+      const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
+      const title = lines[0] ?? '';
+      const body = lines.slice(1).join('\n') || title;
+      return {
+        kind: 'material' as CourseStepKind,
+        title,
+        body,
+      };
+    })
+    .filter((step) => step.title && step.body)
+    .slice(0, 100);
+}
+
 function StateBlock({ title, body }: { title: string; body: string }) {
   return <Card className="state-block"><h2>{title}</h2><p>{body}</p></Card>;
 }
@@ -1825,9 +2070,49 @@ async function copyAndNotify(value: string, message: string) {
   if (copied) showAlert(message);
 }
 
-async function demoResponse<T>(endpoint: string, options: RequestInit, cards: CardRecord[], setCards: React.Dispatch<React.SetStateAction<CardRecord[]>>) {
+async function demoResponse<T>(
+  endpoint: string,
+  options: RequestInit,
+  cards: CardRecord[],
+  setCards: React.Dispatch<React.SetStateAction<CardRecord[]>>,
+  courses: CourseSummary[],
+  setCourses: React.Dispatch<React.SetStateAction<CourseSummary[]>>,
+) {
   const source = cards.length ? cards : demoCards;
   if (endpoint.includes('/me')) return { data: { userId: 'demo', ownerTools: true } } as T;
+  if (endpoint.includes('/courses/') && endpoint.includes('/start')) {
+    const courseId = endpoint.match(/\/courses\/([^/]+)\/start/)?.[1] ?? '';
+    setCourses((items) =>
+      (items.length ? items : demoCourses).map((course) =>
+        course.id === courseId
+          ? { ...course, activeEnrollmentCount: course.activeEnrollmentCount + 1, updatedAt: new Date().toISOString() }
+          : course,
+      ),
+    );
+    return { data: { completed: false } } as T;
+  }
+  if (endpoint.endsWith('/api/miniapp/courses') && options.method === 'POST') {
+    const input = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const nextCourse: CourseSummary = {
+      id: `demo-course-${Date.now()}`,
+      ownerUserId: 'demo',
+      title: String(input.title ?? 'Новый курс'),
+      description: typeof input.description === 'string' ? input.description : null,
+      status: 'active',
+      stepCount: Array.isArray(input.steps) ? input.steps.length : 0,
+      activeEnrollmentCount: 0,
+      completedEnrollmentCount: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    setCourses((items) => [nextCourse, ...(items.length ? items : demoCourses)]);
+    return { data: { course: nextCourse, steps: input.steps ?? [] } } as T;
+  }
+  if (endpoint.includes('/courses')) {
+    const data = courses.length ? courses : demoCourses;
+    if (!courses.length) setCourses(data);
+    return { data } as T;
+  }
   if (endpoint.includes('/queue/cards/')) return { ok: true } as T;
   if (endpoint.includes('/queue')) {
     const items = buildDemoQueueItems(source);

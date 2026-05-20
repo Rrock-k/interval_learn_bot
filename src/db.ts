@@ -242,6 +242,12 @@ export interface CourseAdvanceResult {
   completed: boolean;
 }
 
+export interface CourseSummaryRecord extends CourseRecord {
+  stepCount: number;
+  activeEnrollmentCount: number;
+  completedEnrollmentCount: number;
+}
+
 export interface CreateReminderJobInput {
   cardId: string;
   userId: string;
@@ -1043,6 +1049,119 @@ export class CardStore {
       ],
     );
     return rowToCourseStep(rows[0]);
+  }
+
+  async listCourseSummariesByOwner(ownerUserId: string): Promise<CourseSummaryRecord[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT courses.*,
+             COUNT(DISTINCT course_steps.id) AS step_count,
+             COUNT(DISTINCT active_enrollments.id) AS active_enrollment_count,
+             COUNT(DISTINCT completed_enrollments.id) AS completed_enrollment_count
+      FROM courses
+      LEFT JOIN course_steps
+        ON course_steps.course_id = courses.id
+      LEFT JOIN course_enrollments active_enrollments
+        ON active_enrollments.course_id = courses.id
+       AND active_enrollments.status = 'active'
+      LEFT JOIN course_enrollments completed_enrollments
+        ON completed_enrollments.course_id = courses.id
+       AND completed_enrollments.status = 'completed'
+      WHERE courses.owner_user_id = $1
+      GROUP BY courses.id
+      ORDER BY courses.updated_at DESC
+    `,
+      [ownerUserId],
+    );
+    return rows.map((row) => ({
+      ...rowToCourse(row),
+      stepCount: Number(row.step_count ?? 0),
+      activeEnrollmentCount: Number(row.active_enrollment_count ?? 0),
+      completedEnrollmentCount: Number(row.completed_enrollment_count ?? 0),
+    }));
+  }
+
+  async findCourseById(courseId: string): Promise<CourseRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM courses WHERE id = $1`,
+      [courseId],
+    );
+    return rows.length ? rowToCourse(rows[0]) : null;
+  }
+
+  async getCourseById(courseId: string): Promise<CourseRecord> {
+    const course = await this.findCourseById(courseId);
+    if (course) {
+      return course;
+    }
+    throw new Error(`Course ${courseId} not found`);
+  }
+
+  async createCourseWithSteps(input: {
+    ownerUserId: string;
+    title: string;
+    description?: string | null;
+    status?: CourseStatus;
+    steps: Array<{
+      kind?: CourseStepKind;
+      title: string;
+      body: string;
+    }>;
+  }): Promise<{ course: CourseRecord; steps: CourseStepRecord[] }> {
+    const client = await this.pool.connect();
+    const now = new Date().toISOString();
+    try {
+      await client.query('BEGIN');
+      const { rows: courseRows } = await client.query(
+        `
+        INSERT INTO courses (
+          id, owner_user_id, title, description, status, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $6
+        )
+        RETURNING *
+      `,
+        [
+          uuid(),
+          input.ownerUserId,
+          input.title.trim(),
+          input.description?.trim() || null,
+          input.status ?? 'active',
+          now,
+        ],
+      );
+      const course = rowToCourse(courseRows[0]);
+      const steps: CourseStepRecord[] = [];
+      for (const [index, step] of input.steps.entries()) {
+        const { rows: stepRows } = await client.query(
+          `
+          INSERT INTO course_steps (
+            id, course_id, position, kind, title, body, created_at, updated_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $7
+          )
+          RETURNING *
+        `,
+          [
+            uuid(),
+            course.id,
+            index + 1,
+            step.kind ?? 'material',
+            step.title.trim(),
+            step.body.trim(),
+            now,
+          ],
+        );
+        steps.push(rowToCourseStep(stepRows[0]));
+      }
+      await client.query('COMMIT');
+      return { course, steps };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async startCourseEnrollment(input: {
