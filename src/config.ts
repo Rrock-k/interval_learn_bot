@@ -26,6 +26,10 @@ export const config = {
   initialReviewMinutes: toNumber(process.env.INITIAL_REVIEW_MINUTES, 60),
   maxIntervalDays: toNumber(process.env.MAX_INTERVAL_DAYS, 45),
   dashboardSecret: requireEnv('DASHBOARD_SECRET'),
+  webSessionSecret: (process.env.WEB_SESSION_SECRET || process.env.DASHBOARD_SECRET || '').trim(),
+  telegramLoginBotUsername: process.env.TELEGRAM_LOGIN_BOT_USERNAME?.replace(/^@/, '').trim() || null,
+  googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || null,
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || null,
   backlogOwnerUserId: (process.env.BACKLOG_OWNER_USER_ID || '359367655').trim(),
   agentApiToken: process.env.AGENT_API_TOKEN?.trim() || null,
   scheduler: {

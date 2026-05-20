@@ -31,6 +31,7 @@ import {
   CARD_ACTIONS,
 } from './reviewKeyboards';
 import { buildMiniAppCardParam, buildMiniAppDeepLink } from './telegramLinks';
+import { getPublicBaseUrl } from './publicUrl';
 import { withDbRetry } from './utils/dbRetry';
 import {
   PRESET_BY_CODE,
@@ -478,9 +479,7 @@ const buildAddedMessage = (mode: ReminderMode, scheduleRule: string | null) => {
 };
 
 const getWebAppUrl = () => {
-  const domain = process.env.PUBLIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000';
-  const protocol = domain.includes('localhost') ? 'http://' : 'https://';
-  return `${protocol}${domain}/miniapp`;
+  return `${getPublicBaseUrl()}/miniapp`;
 };
 
 const getWebAppKeyboard = (url: string) =>

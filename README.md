@@ -30,6 +30,10 @@
   - `REVIEW_BATCH_SIZE` — количество карточек за раз (по умолчанию `5`).
   - `BACKLOG_OWNER_USER_ID` — Telegram user id владельца, которому доступна кнопка «В бэклог агента» (по умолчанию `359367655`).
   - `AGENT_API_TOKEN` — включает read-only API агента `/api/agent/backlog`, если задан.
+  - `PUBLIC_URL` — публичный домен сервиса, например `https://<service>.up.railway.app`; нужен для Mini App и OAuth callback.
+  - `WEB_SESSION_SECRET` — отдельный секрет web-сессий личного кабинета; если не задан, используется `DASHBOARD_SECRET`.
+  - `TELEGRAM_LOGIN_BOT_USERNAME` — username бота без `@` для входа через Telegram Login Widget.
+  - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — OAuth-клиент Google для входа через Google.
 
 Создайте локальный `.env` на основе шаблона:
 
@@ -52,6 +56,8 @@ npm start
 Данные сохраняются в PostgreSQL, схема создаётся автоматически при старте. Добавьте бота администратором в канал, указанный в `CHAT_ID`, чтобы он мог публиковать сообщения и обрабатывать нажатие кнопок.
 
 Откройте `http://localhost:3000` — отобразится страница входа. Введите значение `DASHBOARD_SECRET`, после чего появится дашборд с фильтрами, бэклогом агента, отложенными повторами и удалением карточек.
+
+Личный кабинет доступен по `/account`, вход — `/auth/signin`. Telegram login требует, чтобы публичный домен был указан у BotFather для Telegram Login Widget. Для Google OAuth callback укажите `${PUBLIC_URL}/auth/google/callback`.
 
 ## Архитектура
 - `src/bot.ts` — обработчики Telegram: intake сообщений, подтверждение добавления, обработка оценок.

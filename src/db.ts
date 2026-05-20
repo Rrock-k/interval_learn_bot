@@ -29,6 +29,7 @@ export type QueueScopeType = 'user' | 'chat';
 export type CourseStatus = 'draft' | 'active' | 'archived';
 export type CourseEnrollmentStatus = 'active' | 'completed' | 'paused' | 'archived';
 export type CourseCadence = 'after_view' | 'daily';
+export type AuthProvider = 'telegram' | 'google';
 
 export interface QueueScope {
   type: QueueScopeType;
@@ -248,6 +249,53 @@ export interface CourseSummaryRecord extends CourseRecord {
   completedEnrollmentCount: number;
 }
 
+export interface AppUserRecord {
+  id: string;
+  displayName: string | null;
+  email: string | null;
+  avatarUrl: string | null;
+  primaryTelegramUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserAuthAccountRecord {
+  id: string;
+  appUserId: string;
+  provider: AuthProvider;
+  providerAccountId: string;
+  email: string | null;
+  username: string | null;
+  displayName: string | null;
+  avatarUrl: string | null;
+  rawProfile: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebSessionRecord {
+  id: string;
+  appUserId: string;
+  tokenHash: string;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppSessionRecord extends WebSessionRecord {
+  user: AppUserRecord;
+}
+
+export interface AuthAccountProfileInput {
+  provider: AuthProvider;
+  providerAccountId: string;
+  email?: string | null;
+  username?: string | null;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  rawProfile?: unknown;
+}
+
 export interface CreateReminderJobInput {
   cardId: string;
   userId: string;
@@ -432,6 +480,39 @@ const rowToCourseStepDelivery = (row: any): CourseStepDeliveryRecord => ({
   updatedAt: row.updated_at,
 });
 
+const rowToAppUser = (row: any): AppUserRecord => ({
+  id: row.id,
+  displayName: row.display_name ?? null,
+  email: row.email ?? null,
+  avatarUrl: row.avatar_url ?? null,
+  primaryTelegramUserId: row.primary_telegram_user_id ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToUserAuthAccount = (row: any): UserAuthAccountRecord => ({
+  id: row.id,
+  appUserId: row.app_user_id,
+  provider: row.provider as AuthProvider,
+  providerAccountId: row.provider_account_id,
+  email: row.email ?? null,
+  username: row.username ?? null,
+  displayName: row.display_name ?? null,
+  avatarUrl: row.avatar_url ?? null,
+  rawProfile: row.raw_profile ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToWebSession = (row: any): WebSessionRecord => ({
+  id: row.id,
+  appUserId: row.app_user_id,
+  tokenHash: row.token_hash,
+  expiresAt: row.expires_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
 const buildPoolConfig = (connectionString: string): PoolConfig => {
   const sslRequired =
     process.env.PGSSLMODE === 'require' ||
@@ -594,6 +675,264 @@ export class CardStore {
         source: 'notification_chat_reset',
       });
     }
+  }
+
+  async resolveAppUserForAuthAccount(input: AuthAccountProfileInput, currentAppUserId?: string | null): Promise<{
+    user: AppUserRecord;
+    account: UserAuthAccountRecord;
+    createdUser: boolean;
+    linkedAccount: boolean;
+  }> {
+    const client = await this.pool.connect();
+    const now = new Date().toISOString();
+    const rawProfile = input.rawProfile === undefined ? null : JSON.stringify(input.rawProfile);
+    const primaryTelegramUserId = input.provider === 'telegram' ? input.providerAccountId : null;
+    try {
+      await client.query('BEGIN');
+      const { rows: existingRows } = await client.query(
+        `
+        SELECT *
+        FROM user_auth_accounts
+        WHERE provider = $1 AND provider_account_id = $2
+        FOR UPDATE
+      `,
+        [input.provider, input.providerAccountId],
+      );
+      const existingAccount = existingRows[0] ? rowToUserAuthAccount(existingRows[0]) : null;
+
+      let appUserId = currentAppUserId || existingAccount?.appUserId || null;
+      let createdUser = false;
+      let linkedAccount = false;
+
+      if (currentAppUserId && existingAccount && existingAccount.appUserId !== currentAppUserId) {
+        throw Object.assign(new Error('Этот аккаунт уже привязан к другому пользователю'), {
+          statusCode: 409,
+          code: 'AUTH_ACCOUNT_ALREADY_LINKED',
+        });
+      }
+
+      if (appUserId) {
+        const { rows: userRows } = await client.query(
+          `SELECT * FROM app_users WHERE id = $1 FOR UPDATE`,
+          [appUserId],
+        );
+        if (!userRows.length) {
+          throw Object.assign(new Error('Пользователь не найден'), { statusCode: 404 });
+        }
+      } else {
+        appUserId = uuid();
+        await client.query(
+          `
+          INSERT INTO app_users (
+            id, display_name, email, avatar_url, primary_telegram_user_id, created_at, updated_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $6
+          )
+        `,
+          [
+            appUserId,
+            input.displayName ?? null,
+            input.email ?? null,
+            input.avatarUrl ?? null,
+            primaryTelegramUserId,
+            now,
+          ],
+        );
+        createdUser = true;
+      }
+
+      await client.query(
+        `
+        UPDATE app_users
+        SET display_name = COALESCE($1, display_name),
+            email = COALESCE($2, email),
+            avatar_url = COALESCE($3, avatar_url),
+            primary_telegram_user_id = COALESCE($4, primary_telegram_user_id),
+            updated_at = $5
+        WHERE id = $6
+      `,
+        [
+          input.displayName ?? null,
+          input.email ?? null,
+          input.avatarUrl ?? null,
+          primaryTelegramUserId,
+          now,
+          appUserId,
+        ],
+      );
+
+      if (existingAccount) {
+        const { rows: accountRows } = await client.query(
+          `
+          UPDATE user_auth_accounts
+          SET email = $1,
+              username = $2,
+              display_name = $3,
+              avatar_url = $4,
+              raw_profile = $5,
+              updated_at = $6
+          WHERE id = $7
+          RETURNING *
+        `,
+          [
+            input.email ?? null,
+            input.username ?? null,
+            input.displayName ?? null,
+            input.avatarUrl ?? null,
+            rawProfile,
+            now,
+            existingAccount.id,
+          ],
+        );
+        const { rows: userRows } = await client.query(
+          `SELECT * FROM app_users WHERE id = $1`,
+          [appUserId],
+        );
+        await client.query('COMMIT');
+        return {
+          user: rowToAppUser(userRows[0]),
+          account: rowToUserAuthAccount(accountRows[0]),
+          createdUser,
+          linkedAccount,
+        };
+      }
+
+      const { rows: accountRows } = await client.query(
+        `
+        INSERT INTO user_auth_accounts (
+          id, app_user_id, provider, provider_account_id, email, username,
+          display_name, avatar_url, raw_profile, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6,
+          $7, $8, $9, $10, $10
+        )
+        RETURNING *
+      `,
+        [
+          uuid(),
+          appUserId,
+          input.provider,
+          input.providerAccountId,
+          input.email ?? null,
+          input.username ?? null,
+          input.displayName ?? null,
+          input.avatarUrl ?? null,
+          rawProfile,
+          now,
+        ],
+      );
+      linkedAccount = true;
+
+      const { rows: userRows } = await client.query(
+        `SELECT * FROM app_users WHERE id = $1`,
+        [appUserId],
+      );
+      await client.query('COMMIT');
+      return {
+        user: rowToAppUser(userRows[0]),
+        account: rowToUserAuthAccount(accountRows[0]),
+        createdUser,
+        linkedAccount,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getAppUserById(appUserId: string): Promise<AppUserRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM app_users WHERE id = $1`,
+      [appUserId],
+    );
+    return rows.length ? rowToAppUser(rows[0]) : null;
+  }
+
+  async listAuthAccounts(appUserId: string): Promise<UserAuthAccountRecord[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT *
+      FROM user_auth_accounts
+      WHERE app_user_id = $1
+      ORDER BY provider ASC, created_at ASC
+    `,
+      [appUserId],
+    );
+    return rows.map(rowToUserAuthAccount);
+  }
+
+  async createWebSession(input: {
+    appUserId: string;
+    tokenHash: string;
+    expiresAt: string;
+  }): Promise<WebSessionRecord> {
+    const now = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO web_sessions (
+        id, app_user_id, token_hash, expires_at, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $5
+      )
+      RETURNING *
+    `,
+      [uuid(), input.appUserId, input.tokenHash, input.expiresAt, now],
+    );
+    return rowToWebSession(rows[0]);
+  }
+
+  async findWebSessionByTokenHash(tokenHash: string): Promise<AppSessionRecord | null> {
+    const now = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      SELECT web_sessions.*,
+             app_users.id AS user_id,
+             app_users.display_name,
+             app_users.email,
+             app_users.avatar_url,
+             app_users.primary_telegram_user_id,
+             app_users.created_at AS user_created_at,
+             app_users.updated_at AS user_updated_at
+      FROM web_sessions
+      JOIN app_users ON app_users.id = web_sessions.app_user_id
+      WHERE web_sessions.token_hash = $1
+        AND web_sessions.expires_at > $2
+      LIMIT 1
+    `,
+      [tokenHash, now],
+    );
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      ...rowToWebSession(row),
+      user: {
+        id: row.user_id,
+        displayName: row.display_name ?? null,
+        email: row.email ?? null,
+        avatarUrl: row.avatar_url ?? null,
+        primaryTelegramUserId: row.primary_telegram_user_id ?? null,
+        createdAt: row.user_created_at,
+        updatedAt: row.user_updated_at,
+      },
+    };
+  }
+
+  async deleteWebSessionByTokenHash(tokenHash: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM web_sessions WHERE token_hash = $1`,
+      [tokenHash],
+    );
+  }
+
+  async deleteExpiredWebSessions(): Promise<number> {
+    const now = new Date().toISOString();
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM web_sessions WHERE expires_at <= $1`,
+      [now],
+    );
+    return rowCount ?? 0;
   }
 
   private async getDeliverySettings(userId: string): Promise<DeliverySettings> {

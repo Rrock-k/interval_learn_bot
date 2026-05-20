@@ -36,6 +36,10 @@
 | `REVIEW_SCAN_INTERVAL_MS` | нет | Интервал проверки очереди (по умолчанию 60000) |
 | `REVIEW_BATCH_SIZE` | нет | Сколько карточек отправлять за один проход (по умолчанию 5) |
 | `BACKLOG_OWNER_USER_ID` | нет | Telegram user id владельца кнопки «В бэклог агента» (по умолчанию `359367655`) |
+| `PUBLIC_URL` | нет | Публичный домен сервиса, например `https://<service>.up.railway.app`; если не задан, код использует `RAILWAY_PUBLIC_DOMAIN` |
+| `WEB_SESSION_SECRET` | нет | Секрет личного кабинета; по умолчанию используется `DASHBOARD_SECRET` |
+| `TELEGRAM_LOGIN_BOT_USERNAME` | нет | Username бота без `@` для Telegram web-login |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | нет | Google OAuth credentials для входа через Google |
 
 CLI-аналог:
 
@@ -46,6 +50,10 @@ railway variables set INITIAL_REVIEW_MINUTES=20 REVIEW_SCAN_INTERVAL_MS=90000
 ```
 
 > При добавлении Railway Postgres переменные `DATABASE_URL`, `DATABASE_PUBLIC_URL`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` и др. будут заполнены автоматически. Боту достаточно `DATABASE_URL`.
+
+Для личного кабинета:
+- Telegram login: в BotFather укажите тот же домен, что в `PUBLIC_URL`, и задайте `TELEGRAM_LOGIN_BOT_USERNAME`.
+- Google login: в Google Cloud Console добавьте redirect URI `${PUBLIC_URL}/auth/google/callback`, затем задайте `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET`.
 
 ## 4. Настройки деплоя
 - В разделе **Deployments → Build** ничего менять не нужно: `railway.json` фиксирует использование Dockerfile.

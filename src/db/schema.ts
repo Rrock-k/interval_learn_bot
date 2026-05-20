@@ -117,6 +117,65 @@ export const unrecognizedSchedules = pgTable('unrecognized_schedules', {
   createdAt: text('created_at').notNull(),
 });
 
+export const appUsers = pgTable(
+  'app_users',
+  {
+    id: text('id').primaryKey(),
+    displayName: text('display_name'),
+    email: text('email'),
+    avatarUrl: text('avatar_url'),
+    primaryTelegramUserId: text('primary_telegram_user_id'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_app_users_primary_telegram_user_id').on(table.primaryTelegramUserId),
+    index('idx_app_users_email').on(table.email),
+  ],
+);
+
+export const userAuthAccounts = pgTable(
+  'user_auth_accounts',
+  {
+    id: text('id').primaryKey(),
+    appUserId: text('app_user_id').notNull().references(() => appUsers.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    providerAccountId: text('provider_account_id').notNull(),
+    email: text('email'),
+    username: text('username'),
+    displayName: text('display_name'),
+    avatarUrl: text('avatar_url'),
+    rawProfile: text('raw_profile'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_user_auth_accounts_provider_account').on(table.provider, table.providerAccountId),
+    index('idx_user_auth_accounts_app_user').on(table.appUserId),
+    check(
+      'user_auth_accounts_provider_check',
+      sql`${table.provider} IN ('telegram', 'google')`,
+    ),
+  ],
+);
+
+export const webSessions = pgTable(
+  'web_sessions',
+  {
+    id: text('id').primaryKey(),
+    appUserId: text('app_user_id').notNull().references(() => appUsers.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: text('expires_at').notNull(),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_web_sessions_token_hash').on(table.tokenHash),
+    index('idx_web_sessions_app_user').on(table.appUserId),
+    index('idx_web_sessions_expires_at').on(table.expiresAt),
+  ],
+);
+
 export const courses = pgTable(
   'courses',
   {

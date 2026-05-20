@@ -13,6 +13,8 @@ import cookieParser from 'cookie-parser';
 import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
 import {
+  AppSessionRecord,
+  AppUserRecord,
   BacklogItemStatus,
   buildUserQueueScope,
   CardRecord,
@@ -20,19 +22,31 @@ import {
   CardStore,
   CourseCadence,
   ReminderJobRecord,
+  UserAuthAccountRecord,
   UserReminderSettings,
 } from './db';
 import { CourseStepKind } from './courses';
 import { config } from './config';
 import { logger } from './logger';
+import { getPublicBaseUrl } from './publicUrl';
 import { ReminderRebalancePreviewChange } from './reminderRebalance';
 import { ReviewScheduler } from './reviewScheduler';
 import { computeReview } from './spacedRepetition';
 import { withDbRetry } from './utils/dbRetry';
+import {
+  hashToken,
+  parseGoogleProfile,
+  randomUrlToken,
+  verifyTelegramLoginAuth,
+} from './webAuth';
 
 const publicDir = path.join(process.cwd(), 'public');
 const DASHBOARD_SESSION_COOKIE = 'dashboard_session';
+const APP_SESSION_COOKIE = 'app_session';
+const OAUTH_STATE_COOKIE = 'oauth_state';
+const OAUTH_NEXT_COOKIE = 'oauth_next';
 const DASHBOARD_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 дней
+const APP_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 дней
 
 const allowedStatuses: CardStatus[] = ['pending', 'learning', 'awaiting_grade', 'archived'];
 const allowedBacklogStatuses: BacklogItemStatus[] = ['open', 'done', 'archived'];
@@ -187,14 +201,30 @@ export const createHttpServer = (
     sameSite: 'strict',
     secure: process.env.NODE_ENV === 'production',
   };
+  const appCookieOptions: CookieOptions = {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+  };
   const sessionCookieOptions: CookieOptions = {
     ...baseCookieOptions,
     maxAge: DASHBOARD_SESSION_DURATION_MS,
   };
+  const appSessionCookieOptions: CookieOptions = {
+    ...appCookieOptions,
+    maxAge: APP_SESSION_DURATION_MS,
+  };
+  const oauthCookieOptions: CookieOptions = {
+    ...appCookieOptions,
+    maxAge: 1000 * 60 * 10,
+  };
   const expectedSecretHash = hashSecret(config.dashboardSecret);
+  const webSessionSecretHash = hashSecret(config.webSessionSecret);
   const expectedAgentApiTokenHash = config.agentApiToken
     ? hashSecret(config.agentApiToken)
     : null;
+  const publicBaseUrl = getPublicBaseUrl();
 
   const getSessionToken = (req: Request): string | undefined => {
     const token = req.cookies?.[DASHBOARD_SESSION_COOKIE];
@@ -218,6 +248,46 @@ export const createHttpServer = (
       return;
     }
     res.status(401).json({ error: 'Необходима авторизация' });
+  };
+
+  const getAppSessionToken = (req: Request): string | undefined => {
+    const token = req.cookies?.[APP_SESSION_COOKIE];
+    return typeof token === 'string' ? token : undefined;
+  };
+
+  const getAppSession = async (req: Request): Promise<AppSessionRecord | null> => {
+    const token = getAppSessionToken(req);
+    if (!token) return null;
+    const tokenHash = hashToken(`${token}.${webSessionSecretHash.toString('hex')}`);
+    return withDbRetry(() => store.findWebSessionByTokenHash(tokenHash));
+  };
+
+  const createAppSession = async (res: Response, appUserId: string) => {
+    const token = randomUrlToken();
+    const tokenHash = hashToken(`${token}.${webSessionSecretHash.toString('hex')}`);
+    const expiresAt = new Date(Date.now() + APP_SESSION_DURATION_MS).toISOString();
+    await withDbRetry(() => store.createWebSession({ appUserId, tokenHash, expiresAt }));
+    res.cookie(APP_SESSION_COOKIE, token, appSessionCookieOptions);
+  };
+
+  const clearAppSession = async (req: Request, res: Response) => {
+    const token = getAppSessionToken(req);
+    if (token) {
+      const tokenHash = hashToken(`${token}.${webSessionSecretHash.toString('hex')}`);
+      await withDbRetry(() => store.deleteWebSessionByTokenHash(tokenHash));
+    }
+    res.clearCookie(APP_SESSION_COOKIE, appCookieOptions);
+  };
+
+  const requireAppAuth = async (req: Request, res: Response, next: NextFunction) => {
+    const session = await getAppSession(req);
+    if (!session) {
+      const nextPath = encodeURIComponent(req.originalUrl ?? '/account');
+      res.redirect(`/auth/signin?next=${nextPath}`);
+      return;
+    }
+    (req as any).appSession = session;
+    next();
   };
 
   const getAgentApiToken = (req: Request): string | undefined => {
@@ -295,6 +365,193 @@ export const createHttpServer = (
   app.post('/logout', (req, res) => {
     res.clearCookie(DASHBOARD_SESSION_COOKIE, baseCookieOptions);
     res.redirect('/login');
+  });
+
+  app.get('/auth/signin', async (req, res) => {
+    const nextPath = resolveNextPath(req.query.next) ?? '/account';
+    const session = await getAppSession(req);
+    if (session) {
+      res.redirect(nextPath);
+      return;
+    }
+    res.cookie(OAUTH_NEXT_COOKIE, nextPath, oauthCookieOptions);
+    const options: AuthSignInPageOptions = {
+      next: nextPath,
+      publicBaseUrl,
+      googleEnabled: Boolean(config.googleClientId && config.googleClientSecret),
+      telegramLoginBotUsername: config.telegramLoginBotUsername,
+    };
+    if (typeof req.query.error === 'string') {
+      options.error = req.query.error;
+    }
+    res.send(renderAuthSignInPage(options));
+  });
+
+  app.get('/auth/google', async (req, res) => {
+    if (!config.googleClientId || !config.googleClientSecret) {
+      res.redirect('/auth/signin?error=google_not_configured');
+      return;
+    }
+    const state = randomUrlToken(18);
+    const nextPath = resolveNextPath(req.query.next) ?? '/account';
+    res.cookie(OAUTH_STATE_COOKIE, state, oauthCookieOptions);
+    res.cookie(OAUTH_NEXT_COOKIE, nextPath, oauthCookieOptions);
+
+    const redirectUri = `${publicBaseUrl}/auth/google/callback`;
+    const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    url.searchParams.set('client_id', config.googleClientId);
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('scope', 'openid email profile');
+    url.searchParams.set('state', state);
+    url.searchParams.set('prompt', 'select_account');
+    res.redirect(url.toString());
+  });
+
+  app.get('/auth/google/callback', async (req, res) => {
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const expectedState = typeof req.cookies?.[OAUTH_STATE_COOKIE] === 'string'
+      ? req.cookies[OAUTH_STATE_COOKIE]
+      : '';
+    const nextPath = resolveNextPath(req.cookies?.[OAUTH_NEXT_COOKIE]) ?? '/account';
+    res.clearCookie(OAUTH_STATE_COOKIE, appCookieOptions);
+    res.clearCookie(OAUTH_NEXT_COOKIE, appCookieOptions);
+
+    if (!config.googleClientId || !config.googleClientSecret || !code || !state || state !== expectedState) {
+      res.redirect('/auth/signin?error=google_auth_failed');
+      return;
+    }
+
+    try {
+      const redirectUri = `${publicBaseUrl}/auth/google/callback`;
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: config.googleClientId,
+          client_secret: config.googleClientSecret,
+          code,
+          grant_type: 'authorization_code',
+          redirect_uri: redirectUri,
+        }),
+      });
+      if (!tokenResponse.ok) {
+        throw new Error(`Google token exchange failed: ${tokenResponse.status}`);
+      }
+      const tokenData = await tokenResponse.json() as { access_token?: string };
+      if (!tokenData.access_token) {
+        throw new Error('Google token response has no access_token');
+      }
+      const profileResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      });
+      if (!profileResponse.ok) {
+        throw new Error(`Google profile request failed: ${profileResponse.status}`);
+      }
+      const rawProfile = await profileResponse.json();
+      const profile = parseGoogleProfile(rawProfile);
+      if (!profile) {
+        throw new Error('Google profile is invalid');
+      }
+
+      const currentSession = await getAppSession(req);
+      const resolved = await withDbRetry(() =>
+        store.resolveAppUserForAuthAccount({
+          provider: 'google',
+          providerAccountId: profile.id,
+          email: profile.email,
+          displayName: profile.name,
+          avatarUrl: profile.picture,
+          rawProfile,
+        }, currentSession?.user.id),
+      );
+      if (!currentSession || currentSession.user.id !== resolved.user.id) {
+        await createAppSession(res, resolved.user.id);
+      }
+      res.redirect(nextPath);
+    } catch (error) {
+      logger.error('Google auth failed', error);
+      const statusCode = getHttpStatus(error);
+      const target = statusCode === 409 ? '/account?error=account_already_linked' : '/auth/signin?error=google_auth_failed';
+      res.redirect(target);
+    }
+  });
+
+  app.get('/auth/telegram/callback', async (req, res) => {
+    const nextPath =
+      resolveNextPath(req.cookies?.[OAUTH_NEXT_COOKIE]) ?? resolveNextPath(req.query.next) ?? '/account';
+    res.clearCookie(OAUTH_NEXT_COOKIE, appCookieOptions);
+    const profile = verifyTelegramLoginAuth(req.query, config.botToken);
+    if (!profile) {
+      res.redirect('/auth/signin?error=telegram_auth_failed');
+      return;
+    }
+
+    try {
+      await withDbRetry(() =>
+        store.createUser({
+          id: profile.id,
+          ...(profile.username ? { username: profile.username } : {}),
+          ...(profile.firstName ? { firstName: profile.firstName } : {}),
+          ...(profile.lastName ? { lastName: profile.lastName } : {}),
+        }),
+      );
+      const currentSession = await getAppSession(req);
+      const displayName = [profile.firstName, profile.lastName].filter(Boolean).join(' ')
+        || (profile.username ? `@${profile.username}` : `Telegram ${profile.id}`);
+      const resolved = await withDbRetry(() =>
+        store.resolveAppUserForAuthAccount({
+          provider: 'telegram',
+          providerAccountId: profile.id,
+          username: profile.username,
+          displayName,
+          avatarUrl: profile.photoUrl,
+          rawProfile: profile,
+        }, currentSession?.user.id),
+      );
+      if (!currentSession || currentSession.user.id !== resolved.user.id) {
+        await createAppSession(res, resolved.user.id);
+      }
+      res.redirect(nextPath);
+    } catch (error) {
+      logger.error('Telegram auth failed', error);
+      const statusCode = getHttpStatus(error);
+      const target = statusCode === 409 ? '/account?error=account_already_linked' : '/auth/signin?error=telegram_auth_failed';
+      res.redirect(target);
+    }
+  });
+
+  app.post('/auth/logout', async (req, res) => {
+    await clearAppSession(req, res);
+    res.redirect('/auth/signin');
+  });
+
+  app.get('/account', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    const accounts = await withDbRetry(() => store.listAuthAccounts(session.user.id));
+    const options: AccountPageOptions = {
+      user: session.user,
+      accounts,
+      publicBaseUrl,
+      googleEnabled: Boolean(config.googleClientId && config.googleClientSecret),
+      telegramLoginBotUsername: config.telegramLoginBotUsername,
+    };
+    if (typeof req.query.error === 'string') {
+      options.error = req.query.error;
+    }
+    res.send(renderAccountPage(options));
+  });
+
+  app.get('/api/account/me', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    const accounts = await withDbRetry(() => store.listAuthAccounts(session.user.id));
+    res.json({
+      data: {
+        user: session.user,
+        accounts,
+      },
+    });
   });
 
   // Mini App authentication middleware
@@ -1357,6 +1614,214 @@ const renderLoginPage = (options: LoginPageOptions = {}) => {
   </body>
 </html>`;
 };
+
+type AuthSignInPageOptions = {
+  next: string;
+  publicBaseUrl: string;
+  googleEnabled: boolean;
+  telegramLoginBotUsername: string | null;
+  error?: string;
+};
+
+const renderAuthSignInPage = (options: AuthSignInPageOptions) => {
+  const telegramWidget = options.telegramLoginBotUsername
+    ? renderTelegramLoginWidget({
+        botUsername: options.telegramLoginBotUsername,
+        authUrl: `${options.publicBaseUrl}/auth/telegram/callback`,
+      })
+    : '<p class="muted">Telegram web-login включится после настройки TELEGRAM_LOGIN_BOT_USERNAME и домена у BotFather.</p>';
+  const googleButton = options.googleEnabled
+    ? `<a class="button" href="/auth/google?next=${encodeURIComponent(options.next)}">Войти через Google</a>`
+    : '<p class="muted">Google login включится после настройки GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET.</p>';
+  const errorMessage = options.error
+    ? `<p class="error">${escapeHtml(authErrorLabel(options.error))}</p>`
+    : '';
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Личный кабинет</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="auth-card">
+      <p class="eyebrow">Interval Learn Bot</p>
+      <h1>Личный кабинет</h1>
+      <p class="lead">Войдите через Telegram или Google. После входа можно подключить второй способ.</p>
+      ${errorMessage}
+      <div class="actions">
+        ${googleButton}
+        <div class="telegram-box">${telegramWidget}</div>
+      </div>
+      <a class="secondary-link" href="/login">Админская панель по секрету</a>
+    </main>
+  </body>
+</html>`;
+};
+
+type AccountPageOptions = {
+  user: AppUserRecord;
+  accounts: UserAuthAccountRecord[];
+  publicBaseUrl: string;
+  googleEnabled: boolean;
+  telegramLoginBotUsername: string | null;
+  error?: string;
+};
+
+const renderAccountPage = (options: AccountPageOptions) => {
+  const googleConnected = options.accounts.some((account) => account.provider === 'google');
+  const telegramConnected = options.accounts.some((account) => account.provider === 'telegram');
+  const telegramAccount = options.accounts.find((account) => account.provider === 'telegram');
+  const displayName = options.user.displayName || options.user.email || 'Пользователь';
+  const errorMessage = options.error
+    ? `<p class="error">${escapeHtml(authErrorLabel(options.error))}</p>`
+    : '';
+  const telegramWidget = !telegramConnected && options.telegramLoginBotUsername
+    ? renderTelegramLoginWidget({
+        botUsername: options.telegramLoginBotUsername,
+        authUrl: `${options.publicBaseUrl}/auth/telegram/callback`,
+      })
+    : '';
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Аккаунт</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="account-shell">
+      <section class="panel profile-panel">
+        <div>
+          <p class="eyebrow">Личный кабинет</p>
+          <h1>${escapeHtml(displayName)}</h1>
+          <p class="lead">${escapeHtml(options.user.email || 'Telegram account')}</p>
+        </div>
+        <form method="post" action="/auth/logout">
+          <button class="ghost-button" type="submit">Выйти</button>
+        </form>
+      </section>
+
+      ${errorMessage}
+
+      <section class="panel">
+        <h2>Подключённые входы</h2>
+        <div class="provider-list">
+          ${renderProviderRow({
+            title: 'Telegram',
+            connected: telegramConnected,
+            detail: telegramConnected
+              ? `ID ${telegramAccount?.providerAccountId ?? options.user.primaryTelegramUserId ?? ''}`
+              : 'Нужен для привязки напоминаний и Mini App.',
+            action: telegramConnected
+              ? ''
+              : telegramWidget || '<span class="muted">Настройте TELEGRAM_LOGIN_BOT_USERNAME.</span>',
+          })}
+          ${renderProviderRow({
+            title: 'Google',
+            connected: googleConnected,
+            detail: googleConnected ? 'Можно входить через Google.' : 'Можно подключить как второй способ входа.',
+            action: googleConnected
+              ? ''
+              : options.googleEnabled
+                ? '<a class="button small" href="/auth/google?next=/account">Подключить Google</a>'
+                : '<span class="muted">Настройте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET.</span>',
+          })}
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Ссылки</h2>
+        <div class="link-grid">
+          <a class="button secondary" href="/miniapp">Открыть Mini App</a>
+          <a class="button secondary" href="/auth/signin">Страница входа</a>
+          <a class="button secondary" href="/login">Админская панель</a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>`;
+};
+
+const renderTelegramLoginWidget = ({
+  botUsername,
+  authUrl,
+}: {
+  botUsername: string;
+  authUrl: string;
+}) => `
+<script async src="https://telegram.org/js/telegram-widget.js?22"
+  data-telegram-login="${escapeHtml(botUsername)}"
+  data-size="large"
+  data-auth-url="${escapeHtml(authUrl)}"
+  data-request-access="write"></script>`;
+
+const renderProviderRow = ({
+  title,
+  connected,
+  detail,
+  action,
+}: {
+  title: string;
+  connected: boolean;
+  detail: string;
+  action: string;
+}) => `
+<div class="provider-row">
+  <div>
+    <h3>${escapeHtml(title)}</h3>
+    <p>${escapeHtml(detail)}</p>
+  </div>
+  <div class="provider-action">
+    ${connected ? '<span class="status connected">Подключено</span>' : action}
+  </div>
+</div>`;
+
+const authErrorLabel = (code: string) => {
+  const labels: Record<string, string> = {
+    google_not_configured: 'Google login пока не настроен.',
+    google_auth_failed: 'Не удалось войти через Google.',
+    telegram_auth_failed: 'Не удалось войти через Telegram.',
+    account_already_linked: 'Этот внешний аккаунт уже привязан к другому пользователю.',
+  };
+  return labels[code] ?? 'Не удалось выполнить вход.';
+};
+
+const renderAccountStyles = () => `
+<style>
+  :root { color-scheme: light; --bg: #f5f5f0; --panel: #ffffff; --text: #1f2933; --muted: #6b7280; --border: #d9d9d2; --accent: #111827; --accentText: #ffffff; --danger: #b42318; --ok: #047857; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .auth-card { width: min(100% - 32px, 440px); margin: 12vh auto 0; padding: 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--panel); box-shadow: 0 18px 50px rgba(17,24,39,.08); }
+  .account-shell { width: min(100% - 32px, 760px); margin: 32px auto; display: grid; gap: 14px; }
+  .panel { border: 1px solid var(--border); border-radius: 18px; background: var(--panel); padding: 22px; }
+  .profile-panel { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; font-weight: 700; }
+  h1 { margin: 0; font-size: 30px; line-height: 1.1; }
+  h2 { margin: 0 0 14px; font-size: 18px; }
+  h3 { margin: 0 0 4px; font-size: 15px; }
+  .lead, .provider-row p, .muted { color: var(--muted); font-size: 14px; line-height: 1.45; }
+  .lead { margin: 10px 0 0; }
+  .actions { display: grid; gap: 14px; margin-top: 22px; }
+  .telegram-box { min-height: 44px; display: flex; align-items: center; }
+  .button, button { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--accentText); padding: 0 16px; font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer; }
+  .button.small { min-height: 36px; font-size: 13px; }
+  .button.secondary, .ghost-button { border-color: var(--border); background: transparent; color: var(--text); }
+  .secondary-link { display: inline-flex; margin-top: 18px; color: var(--muted); font-size: 13px; }
+  .provider-list { display: grid; gap: 10px; }
+  .provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 64px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; }
+  .provider-row p { margin: 0; }
+  .provider-action { display: flex; justify-content: flex-end; }
+  .status { display: inline-flex; min-height: 30px; align-items: center; border-radius: 999px; padding: 0 10px; font-size: 12px; font-weight: 700; }
+  .connected { color: var(--ok); background: #ecfdf3; }
+  .error { color: var(--danger); margin: 14px 0 0; font-size: 14px; }
+  .link-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  @media (max-width: 540px) { .profile-panel, .provider-row { grid-template-columns: 1fr; display: grid; } .provider-action { justify-content: flex-start; } }
+</style>`;
 
 const escapeHtml = (value: string): string => {
   const map: Record<string, string> = {
