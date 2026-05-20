@@ -24,10 +24,18 @@ export type ReminderJobStatus =
   | 'snoozed'
   | 'cancelled'
   | 'failed';
+export type QueueScopeType = 'user' | 'chat';
+
+export interface QueueScope {
+  type: QueueScopeType;
+  id: string;
+}
 
 export interface CardRecord {
   id: string;
   userId: string;
+  queueScopeType: QueueScopeType;
+  queueScopeId: string;
   sourceChatId: string;
   sourceMessageId: number;
   sourceMessageIds: number[] | null;
@@ -70,6 +78,8 @@ export interface BacklogItemRecord {
 export interface CreatePendingCardInput {
   id: string;
   userId: string;
+  queueScopeType?: QueueScopeType;
+  queueScopeId?: string;
   sourceChatId: string;
   sourceMessageId: number;
   sourceMessageIds?: number[] | null;
@@ -127,6 +137,8 @@ export interface ReminderJobRecord {
   id: string;
   cardId: string;
   userId: string;
+  queueScopeType: QueueScopeType;
+  queueScopeId: string;
   kind: ReminderJobKind;
   source: string;
   status: ReminderJobStatus;
@@ -177,6 +189,28 @@ export interface CreateReminderJobInput {
 export type ReminderMode = 'sm2' | 'schedule';
 export type UserReminderSettings = DeliverySettings;
 
+export const buildUserQueueScope = (userId: string): QueueScope => ({
+  type: 'user',
+  id: userId,
+});
+
+export const buildChatQueueScope = (chatId: string | number): QueueScope => ({
+  type: 'chat',
+  id: String(chatId),
+});
+
+const normalizeQueueScopeType = (value: unknown): QueueScopeType =>
+  value === 'chat' ? 'chat' : 'user';
+
+const normalizeQueueScope = (input: {
+  userId: string;
+  queueScopeType?: QueueScopeType;
+  queueScopeId?: string;
+}): QueueScope => ({
+  type: input.queueScopeType ?? 'user',
+  id: input.queueScopeId ?? input.userId,
+});
+
 const parseSourceMessageIds = (value: unknown): number[] | null => {
   if (!value) {
     return null;
@@ -213,6 +247,8 @@ const serializeSourceMessageIds = (value?: number[] | null): string | null => {
 const rowToCard = (row: any): CardRecord => ({
   id: row.id,
   userId: row.user_id,
+  queueScopeType: normalizeQueueScopeType(row.queue_scope_type),
+  queueScopeId: row.queue_scope_id ?? row.user_id,
   sourceChatId: row.source_chat_id,
   sourceMessageId: Number(row.source_message_id),
   sourceMessageIds: parseSourceMessageIds(row.source_message_ids),
@@ -256,6 +292,8 @@ const rowToReminderJob = (row: any): ReminderJobRecord => ({
   id: row.id,
   cardId: row.card_id,
   userId: row.user_id,
+  queueScopeType: normalizeQueueScopeType(row.queue_scope_type),
+  queueScopeId: row.queue_scope_id ?? row.user_id,
   kind: row.kind as ReminderJobKind,
   source: row.source,
   status: row.status as ReminderJobStatus,
@@ -403,6 +441,8 @@ export class CardStore {
           next_review_at = CASE WHEN status = 'awaiting_grade' THEN $1 ELSE next_review_at END,
           updated_at = $1
       WHERE user_id = $2
+        AND queue_scope_type = 'user'
+        AND queue_scope_id = $2
         AND status IN ('learning', 'awaiting_grade')
       RETURNING *
     `,
@@ -415,6 +455,8 @@ export class CardStore {
           completed_at = $1,
           updated_at = $1
       WHERE user_id = $2
+        AND queue_scope_type = 'user'
+        AND queue_scope_id = $2
         AND status IN ('pending', 'sending', 'awaiting_action')
         AND kind IN ('review', 'manual_now')
     `,
@@ -498,10 +540,14 @@ export class CardStore {
       FROM reminder_jobs
       JOIN cards ON cards.id = reminder_jobs.card_id
       WHERE reminder_jobs.user_id = $1
+        AND reminder_jobs.queue_scope_type = 'user'
+        AND reminder_jobs.queue_scope_id = $1
         AND reminder_jobs.status = 'pending'
         AND reminder_jobs.kind = 'review'
         AND reminder_jobs.scheduled_at >= $2
         AND reminder_jobs.scheduled_at < $3
+        AND cards.queue_scope_type = 'user'
+        AND cards.queue_scope_id = $1
         AND cards.status <> 'archived'
       ORDER BY reminder_jobs.scheduled_at ASC
       LIMIT 500
@@ -514,6 +560,8 @@ export class CardStore {
       SELECT scheduled_at
       FROM reminder_jobs
       WHERE user_id = $1
+        AND queue_scope_type = 'user'
+        AND queue_scope_id = $1
         AND status = 'pending'
         AND scheduled_at >= $2
         AND scheduled_at < $3
@@ -570,6 +618,8 @@ export class CardStore {
           JOIN cards ON cards.id = reminder_jobs.card_id
           WHERE reminder_jobs.id = $1
             AND reminder_jobs.user_id = $2
+            AND reminder_jobs.queue_scope_type = 'user'
+            AND reminder_jobs.queue_scope_id = $2
           FOR UPDATE OF reminder_jobs
         `,
           [change.jobId, userId],
@@ -618,7 +668,11 @@ export class CardStore {
     }
   }
 
-  private async planScheduledAt(userId: string, dueAt: string): Promise<string> {
+  private async planScheduledAt(
+    userId: string,
+    queueScope: QueueScope,
+    dueAt: string,
+  ): Promise<string> {
     const settings = await this.getDeliverySettings(userId);
     const from = new Date(dueAt);
     from.setDate(from.getDate() - 1);
@@ -628,13 +682,14 @@ export class CardStore {
       `
       SELECT scheduled_at
       FROM reminder_jobs
-      WHERE user_id = $1
+      WHERE queue_scope_type = $1
+        AND queue_scope_id = $2
         AND status = 'pending'
-        AND scheduled_at >= $2
-        AND scheduled_at <= $3
+        AND scheduled_at >= $3
+        AND scheduled_at <= $4
       ORDER BY scheduled_at ASC
     `,
-      [userId, from.toISOString(), to.toISOString()],
+      [queueScope.type, queueScope.id, from.toISOString(), to.toISOString()],
     );
     return planReminderDelivery({
       dueAt,
@@ -643,8 +698,28 @@ export class CardStore {
     });
   }
 
+  private async getCardQueueScope(cardId: string, fallbackUserId: string): Promise<QueueScope> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT queue_scope_type, queue_scope_id, user_id
+      FROM cards
+      WHERE id = $1
+    `,
+      [cardId],
+    );
+    const row = rows[0];
+    if (!row) {
+      return buildUserQueueScope(fallbackUserId);
+    }
+    return {
+      type: normalizeQueueScopeType(row.queue_scope_type),
+      id: row.queue_scope_id ?? row.user_id ?? fallbackUserId,
+    };
+  }
+
   async createReminderJob(input: CreateReminderJobInput): Promise<ReminderJobRecord> {
     const now = new Date().toISOString();
+    const queueScope = await this.getCardQueueScope(input.cardId, input.userId);
     if (input.kind === 'review' || input.kind === 'manual_now' || input.kind === 'one_time') {
       await this.pool.query(
         `
@@ -671,17 +746,17 @@ export class CardStore {
       input.scheduledAt ??
       (input.kind === 'one_time'
         ? input.dueAt
-        : await this.planScheduledAt(input.userId, input.dueAt));
+        : await this.planScheduledAt(input.userId, queueScope, input.dueAt));
     const { rows } = await this.pool.query(
       `
       INSERT INTO reminder_jobs (
-        id, card_id, user_id, kind, source, status,
+        id, card_id, user_id, queue_scope_type, queue_scope_id, kind, source, status,
         due_at, scheduled_at, snoozed_from_job_id, metadata,
         created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, 'pending',
-        $6, $7, $8, $9,
-        $10, $10
+        $1, $2, $3, $4, $5, $6, $7, 'pending',
+        $8, $9, $10, $11,
+        $12, $12
       )
       RETURNING *
     `,
@@ -689,6 +764,8 @@ export class CardStore {
         uuid(),
         input.cardId,
         input.userId,
+        queueScope.type,
+        queueScope.id,
         input.kind,
         input.source ?? input.kind,
         input.dueAt,
@@ -716,10 +793,12 @@ export class CardStore {
 
   async createPendingCard(input: CreatePendingCardInput): Promise<CardRecord> {
     const now = new Date().toISOString();
+    const queueScope = normalizeQueueScope(input);
     const { rows } = await this.pool.query(
       `
       INSERT INTO cards (
-        id, user_id, source_chat_id, source_message_id, source_message_ids,
+        id, user_id, queue_scope_type, queue_scope_id,
+        source_chat_id, source_message_id, source_message_ids,
         content_type, content_preview, content_file_id, content_file_unique_id,
         reminder_mode, schedule_rule, status,
         repetition,
@@ -734,9 +813,10 @@ export class CardStore {
         last_notification_message_id,
         created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5,
-        $6, $7, $8, $9,
-        $10, $11, 'pending',
+        $1, $2, $3, $4,
+        $5, $6, $7,
+        $8, $9, $10, $11,
+        $12, $13, 'pending',
         0,
         NULL,
         NULL,
@@ -747,13 +827,15 @@ export class CardStore {
         NULL,
         NULL,
         NULL,
-        $12, $12
+        $14, $14
       )
       RETURNING *
     `,
       [
         input.id,
         input.userId,
+        queueScope.type,
+        queueScope.id,
         input.sourceChatId,
         input.sourceMessageId,
         serializeSourceMessageIds(input.sourceMessageIds),
@@ -1005,9 +1087,33 @@ export class CardStore {
     return rows.map(rowToCard);
   }
 
-  async listCardsByUser(params: ListCardsParams & { userId: string }): Promise<CardRecord[]> {
+  async listCardsByUser(
+    params: ListCardsParams & { userId: string; queueScope?: QueueScope },
+  ): Promise<CardRecord[]> {
     const limit = params.limit ?? 100;
     if (params.status) {
+      if (params.queueScope) {
+        const { rows } = await this.pool.query(
+          `
+          SELECT *
+          FROM cards
+          WHERE user_id = $1
+            AND status = $2
+            AND queue_scope_type = $3
+            AND queue_scope_id = $4
+          ORDER BY updated_at DESC
+          LIMIT $5
+        `,
+          [
+            params.userId,
+            params.status,
+            params.queueScope.type,
+            params.queueScope.id,
+            limit,
+          ],
+        );
+        return rows.map(rowToCard);
+      }
       const { rows } = await this.pool.query(
         `
         SELECT *
@@ -1018,6 +1124,21 @@ export class CardStore {
         LIMIT $3
       `,
         [params.userId, params.status, limit],
+      );
+      return rows.map(rowToCard);
+    }
+    if (params.queueScope) {
+      const { rows } = await this.pool.query(
+        `
+        SELECT *
+        FROM cards
+        WHERE user_id = $1
+          AND queue_scope_type = $2
+          AND queue_scope_id = $3
+        ORDER BY updated_at DESC
+        LIMIT $4
+      `,
+        [params.userId, params.queueScope.type, params.queueScope.id, limit],
       );
       return rows.map(rowToCard);
     }
@@ -1035,6 +1156,14 @@ export class CardStore {
   }
 
   async listReminderQueueByUser(params: { userId: string; limit?: number }): Promise<ReminderQueueItem[]> {
+    const queueScope = buildUserQueueScope(params.userId);
+    if (params.limit === undefined) {
+      return this.listReminderQueueByScope({ queueScope });
+    }
+    return this.listReminderQueueByScope({ queueScope, limit: params.limit });
+  }
+
+  async listReminderQueueByScope(params: { queueScope: QueueScope; limit?: number }): Promise<ReminderQueueItem[]> {
     const limit = Math.min(100, Math.max(1, params.limit ?? 20));
     const now = new Date().toISOString();
     const items: ReminderQueueItem[] = [];
@@ -1045,14 +1174,17 @@ export class CardStore {
              to_jsonb(cards) AS card
       FROM reminder_jobs
       JOIN cards ON cards.id = reminder_jobs.card_id
-      WHERE reminder_jobs.user_id = $1
+      WHERE reminder_jobs.queue_scope_type = $1
+        AND reminder_jobs.queue_scope_id = $2
+        AND cards.queue_scope_type = $1
+        AND cards.queue_scope_id = $2
         AND reminder_jobs.status = 'awaiting_action'
         AND cards.status IN ('learning', 'awaiting_grade')
       ORDER BY reminder_jobs.sent_at ASC NULLS LAST,
                reminder_jobs.updated_at ASC
-      LIMIT $2
+      LIMIT $3
     `,
-      [params.userId, limit],
+      [params.queueScope.type, params.queueScope.id, limit],
     );
     for (const row of activeRows) {
       const job = rowToReminderJob(row.job);
@@ -1073,7 +1205,8 @@ export class CardStore {
         `
         SELECT *
         FROM cards
-        WHERE user_id = $1
+        WHERE queue_scope_type = $1
+          AND queue_scope_id = $2
           AND status = 'awaiting_grade'
           AND NOT EXISTS (
             SELECT 1
@@ -1083,9 +1216,9 @@ export class CardStore {
           )
         ORDER BY awaiting_grade_since ASC NULLS LAST,
                  updated_at ASC
-        LIMIT $2
+        LIMIT $3
       `,
-        [params.userId, remaining],
+        [params.queueScope.type, params.queueScope.id, remaining],
       );
       for (const row of orphanAwaitingRows) {
         const card = rowToCard(row);
@@ -1116,7 +1249,8 @@ export class CardStore {
           ORDER BY reminder_jobs.scheduled_at ASC
           LIMIT 1
         ) reminder_jobs ON true
-        WHERE cards.user_id = $1
+        WHERE cards.queue_scope_type = $1
+          AND cards.queue_scope_id = $2
           AND cards.status = 'learning'
           AND cards.next_review_at IS NOT NULL
           AND NOT EXISTS (
@@ -1126,9 +1260,9 @@ export class CardStore {
               AND active_jobs.status IN ('sending', 'awaiting_action')
           )
         ORDER BY cards.next_review_at ASC
-        LIMIT $2
+        LIMIT $3
       `,
-        [params.userId, remaining],
+        [params.queueScope.type, params.queueScope.id, remaining],
       );
       for (const row of scheduledRows) {
         const card = rowToCard(row.card);

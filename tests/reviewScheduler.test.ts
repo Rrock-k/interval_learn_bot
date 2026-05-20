@@ -27,6 +27,8 @@ type MockStoreCalls = {
 const createCard = (overrides: Partial<CardRecord> = {}): CardRecord => ({
   id: 'card-test',
   userId: '111',
+  queueScopeType: 'user',
+  queueScopeId: '111',
   sourceChatId: '-100111',
   sourceMessageId: 11,
   sourceMessageIds: null,
@@ -61,6 +63,8 @@ const createJob = (
     id: 'job-test',
     cardId: card.id,
     userId: card.userId,
+    queueScopeType: card.queueScopeType,
+    queueScopeId: card.queueScopeId,
     kind: 'manual_now',
     source: 'manual_now',
     status: 'pending',
@@ -280,6 +284,34 @@ test('sendReminderJobToChannel без базы отправляет сохран
     channelMessageId: 555,
     pendingSince: (store.calls.markAwaitingGrade[0] as { pendingSince: string }).pendingSince,
     baseMessageId: 555,
+  });
+});
+
+test('sendReminderJobToChannel для chat-scoped карточки отправляет в чат очереди', async () => {
+  const card = createCard({
+    queueScopeType: 'chat',
+    queueScopeId: '-100777',
+    baseChannelMessageId: null,
+    contentPreview: 'Group note',
+  });
+  const job = createJob(card);
+  const store = createStore({ userNotificationChatId: '-100555', cardById: card });
+  const telegram = createTelegram({
+    sendMessage: async () => ({ message_id: 901 }),
+  });
+  const scheduler = new ReviewScheduler(store.mock as any, telegram.mock);
+
+  await (scheduler as any).sendReminderJobToChannel({ job, card });
+
+  assert.deepEqual(store.calls.getUser, []);
+  assert.equal(telegram.calls.sendMessage[0]?.[0], '-100777');
+  assert.deepEqual(store.calls.markAwaitingGrade[0], {
+    cardId: card.id,
+    jobId: job.id,
+    channelId: '-100777',
+    channelMessageId: 901,
+    pendingSince: (store.calls.markAwaitingGrade[0] as { pendingSince: string }).pendingSince,
+    baseMessageId: 901,
   });
 });
 

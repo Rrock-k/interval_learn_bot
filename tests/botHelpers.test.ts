@@ -1,6 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { buildAddKeyboard, normalizeContentPreview, parseMessage, parseMediaGroup } from '../src/bot';
+import {
+  buildAddKeyboard,
+  normalizeContentPreview,
+  parseAddCommandPayload,
+  parseDirectMentionPayload,
+  parseMessage,
+  parseMediaGroup,
+  resolveQueueScopeForTelegramChat,
+  shouldIgnoreUnaddressedGroupMessage,
+} from '../src/bot';
 
 type AnyMessage = Record<string, unknown>;
 
@@ -124,6 +133,75 @@ test('parseMessage: сохраняет длинный preview без потер�
 test('buildAddKeyboard: owner-only backlog button', () => {
   assert.ok(keyboardLabels(buildAddKeyboard('card-1', true)).includes('В бэклог агента'));
   assert.ok(!keyboardLabels(buildAddKeyboard('card-1', false)).includes('В бэклог агента'));
+});
+
+test('parseAddCommandPayload: accepts group command addressed to this bot', () => {
+  assert.equal(parseAddCommandPayload('/add@LearnBot проверить отчёт', 'LearnBot'), 'проверить отчёт');
+  assert.equal(parseAddCommandPayload('/learn@learnbot материал', '@LearnBot'), 'материал');
+  assert.equal(parseAddCommandPayload('/remind без username', 'LearnBot'), 'без username');
+  assert.equal(parseAddCommandPayload('/add@OtherBot текст', 'LearnBot'), null);
+  assert.equal(parseAddCommandPayload('/add@OtherBot текст'), null);
+  assert.equal(parseAddCommandPayload('/help текст', 'LearnBot'), null);
+});
+
+test('parseDirectMentionPayload: handles plain @bot mention when Telegram delivers it', () => {
+  assert.equal(parseDirectMentionPayload('@LearnBot проверить отчёт', 'LearnBot'), 'проверить отчёт');
+  assert.equal(parseDirectMentionPayload('@OtherBot проверить отчёт', 'LearnBot'), null);
+  assert.equal(parseDirectMentionPayload('@LearnBot', 'LearnBot'), '');
+});
+
+test('shouldIgnoreUnaddressedGroupMessage: drops ambient group traffic before auth', () => {
+  assert.equal(
+    shouldIgnoreUnaddressedGroupMessage({
+      chatType: 'supergroup',
+      text: 'обычное сообщение в чате',
+      botUsername: 'LearnBot',
+    }),
+    true,
+  );
+  assert.equal(
+    shouldIgnoreUnaddressedGroupMessage({
+      chatType: 'group',
+      text: '@LearnBot добавить в очередь',
+      botUsername: 'LearnBot',
+    }),
+    false,
+  );
+  assert.equal(
+    shouldIgnoreUnaddressedGroupMessage({
+      chatType: 'group',
+      text: '@OtherBot добавить в очередь',
+      botUsername: 'LearnBot',
+    }),
+    true,
+  );
+  assert.equal(
+    shouldIgnoreUnaddressedGroupMessage({
+      chatType: 'group',
+      text: '/add@LearnBot добавить в очередь',
+      botUsername: 'LearnBot',
+    }),
+    false,
+  );
+  assert.equal(
+    shouldIgnoreUnaddressedGroupMessage({
+      chatType: 'private',
+      text: 'обычное личное сообщение',
+      botUsername: 'LearnBot',
+    }),
+    false,
+  );
+});
+
+test('resolveQueueScopeForTelegramChat: private stays personal, groups become chat-scoped', () => {
+  assert.deepEqual(
+    resolveQueueScopeForTelegramChat({ id: 111, type: 'private' }, 111),
+    { type: 'user', id: '111' },
+  );
+  assert.deepEqual(
+    resolveQueueScopeForTelegramChat({ id: -100777, type: 'supergroup' }, 111),
+    { type: 'chat', id: '-100777' },
+  );
 });
 
 test('parseMediaGroup: пропускает неподдерживаемые сообщения и берет первую валидную карточку', () => {

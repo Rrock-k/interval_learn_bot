@@ -14,6 +14,8 @@ type CallApiPayload = {
 const createCard = (overrides: Partial<CardRecord> = {}): CardRecord => ({
   id: 'album-card',
   userId: '111',
+  queueScopeType: 'user',
+  queueScopeId: '111',
   sourceChatId: '222',
   sourceMessageId: 10,
   sourceMessageIds: [10, 12, 12, 14],
@@ -45,6 +47,8 @@ const createJob = (card: CardRecord): ReminderJobRecord => {
     id: 'job-album',
     cardId: card.id,
     userId: card.userId,
+    queueScopeType: card.queueScopeType,
+    queueScopeId: card.queueScopeId,
     kind: 'manual_now',
     source: 'manual_now',
     status: 'pending',

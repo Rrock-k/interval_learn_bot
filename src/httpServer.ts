@@ -14,6 +14,7 @@ import { Telegraf } from 'telegraf';
 import { fetch } from 'undici';
 import {
   BacklogItemStatus,
+  buildUserQueueScope,
   CardRecord,
   CardStatus,
   CardStore,
@@ -33,6 +34,11 @@ const DASHBOARD_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 дней
 
 const allowedStatuses: CardStatus[] = ['pending', 'learning', 'awaiting_grade', 'archived'];
 const allowedBacklogStatuses: BacklogItemStatus[] = ['open', 'done', 'archived'];
+
+const isPersonalMiniAppCard = (card: CardRecord, userId: string) =>
+  card.userId === userId &&
+  card.queueScopeType === 'user' &&
+  card.queueScopeId === userId;
 
 const parseLimit = (value: unknown, fallback: number) => {
   if (typeof value !== 'string') return fallback;
@@ -360,7 +366,7 @@ export const createHttpServer = (
     } catch {
       throw queueError(404, 'Карточка не найдена');
     }
-    if (card.userId !== userId) {
+    if (!isPersonalMiniAppCard(card, userId)) {
       throw queueError(403, 'Access denied');
     }
     if (card.status === 'pending') {
@@ -372,7 +378,7 @@ export const createHttpServer = (
 
     if (jobId) {
       const found = await withDbRetry(() => store.getReminderJobWithCard(jobId));
-      if (!found || found.card.id !== cardId || found.card.userId !== userId) {
+      if (!found || found.card.id !== cardId || !isPersonalMiniAppCard(found.card, userId)) {
         throw queueError(404, 'Напоминание не найдено');
       }
       if (found.job.status !== 'awaiting_action') {
@@ -687,8 +693,12 @@ export const createHttpServer = (
     }
     
     try {
+      const queueScope = buildUserQueueScope(userId);
+      const listParams = status
+        ? { userId, status, limit, queueScope }
+        : { userId, limit, queueScope };
       const userCards = await withDbRetry(() =>
-        store.listCardsByUser({ userId, status, limit }),
+        store.listCardsByUser(listParams),
       );
       res.json({ data: userCards });
     } catch (error) {
@@ -708,7 +718,7 @@ export const createHttpServer = (
 
     try {
       const card = await withDbRetry(() => store.getCardById(cardId));
-      if (card.userId !== userId) {
+      if (!isPersonalMiniAppCard(card, userId)) {
         res.status(403).json({ error: 'Access denied' });
         return;
       }
@@ -730,7 +740,7 @@ export const createHttpServer = (
 
     try {
       const card = await withDbRetry(() => store.getCardById(cardId));
-      if (card.userId !== userId) {
+      if (!isPersonalMiniAppCard(card, userId)) {
         res.status(403).json({ error: 'Access denied' });
         return;
       }
@@ -764,8 +774,9 @@ export const createHttpServer = (
     const userId = (req as any).userId;
     
     try {
+      const queueScope = buildUserQueueScope(userId);
       const userCards = await withDbRetry(() =>
-        store.listCardsByUser({ userId, limit: 1000 }),
+        store.listCardsByUser({ userId, limit: 1000, queueScope }),
       );
       
       const stats = {
@@ -884,7 +895,7 @@ export const createHttpServer = (
     try {
       // Verify card belongs to user
       const card = await withDbRetry(() => store.getCardById(cardId));
-      if (card.userId !== userId) {
+      if (!isPersonalMiniAppCard(card, userId)) {
         res.status(403).json({ error: 'Access denied' });
         return;
       }
@@ -908,7 +919,7 @@ export const createHttpServer = (
 
     try {
       const card = await withDbRetry(() => store.getCardById(cardId));
-      if (card.userId !== userId) {
+      if (!isPersonalMiniAppCard(card, userId)) {
         res.status(403).json({ error: 'Access denied' });
         return;
       }
@@ -959,7 +970,7 @@ export const createHttpServer = (
 
     try {
       const card = await withDbRetry(() => store.getCardById(cardId));
-      if (card.userId !== userId) {
+      if (!isPersonalMiniAppCard(card, userId)) {
         res.status(403).json({ error: 'Access denied' });
         return;
       }

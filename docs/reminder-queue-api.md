@@ -4,6 +4,22 @@ Backend contract for the Mini App pull-to-view reminder queue.
 
 All endpoints are Telegram Mini App authenticated and owner-only for now. The current owner check uses `BACKLOG_OWNER_USER_ID`.
 
+## Scope model
+
+Reminders now have an explicit queue scope:
+
+- `queueScopeType = "user"` and `queueScopeId = userId` — personal queue.
+- `queueScopeType = "chat"` and `queueScopeId = telegramChatId` — queue bound to a Telegram chat.
+
+`cards.user_id` and `reminder_jobs.user_id` still mean the creating/owning Telegram user. Queue ordering, delivery collision planning, and reminder delivery use the queue scope. Existing Mini App endpoints below continue to read the personal user scope only; chat-scoped queues are backend-ready but do not yet have a Mini App selector.
+
+Telegram group entrypoint:
+
+- with BotFather privacy mode disabled, the primary UX is `@BotUsername text` in a group, or replying to a message with `@BotUsername`;
+- group/supergroup messages that do not start with `@BotUsername` are dropped before auth, DB writes, parsers, or app logs;
+- fallback explicit commands remain supported: `/add@BotUsername text`, `/learn@BotUsername text`, `/remind@BotUsername text`, or a reply command;
+- inline mode can show helper actions, but it is not the source of truth for creating a chat queue item because selected inline results do not provide a normal chat-bound creation command to this bot.
+
 ## Queue
 
 `GET /api/miniapp/queue?limit=20`

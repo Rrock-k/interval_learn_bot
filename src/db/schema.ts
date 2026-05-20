@@ -30,6 +30,8 @@ export const cards = pgTable(
   {
     id: text('id').primaryKey(),
     userId: text('user_id').notNull(),
+    queueScopeType: text('queue_scope_type').notNull().default('user'),
+    queueScopeId: text('queue_scope_id').notNull(),
     sourceChatId: text('source_chat_id').notNull(),
     sourceMessageId: integer('source_message_id').notNull(),
     sourceMessageIds: text('source_message_ids'),
@@ -69,6 +71,16 @@ export const cards = pgTable(
     check(
       'cards_reminder_mode_check',
       sql`${table.reminderMode} IN ('sm2', 'schedule')`,
+    ),
+    check(
+      'cards_queue_scope_type_check',
+      sql`${table.queueScopeType} IN ('user', 'chat')`,
+    ),
+    index('idx_cards_queue_scope_status_next_review').on(
+      table.queueScopeType,
+      table.queueScopeId,
+      table.status,
+      table.nextReviewAt,
     ),
   ],
 );
@@ -111,6 +123,8 @@ export const reminderJobs = pgTable(
     id: text('id').primaryKey(),
     cardId: text('card_id').notNull().references(() => cards.id, { onDelete: 'cascade' }),
     userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    queueScopeType: text('queue_scope_type').notNull().default('user'),
+    queueScopeId: text('queue_scope_id').notNull(),
     kind: text('kind').notNull(),
     source: text('source').notNull(),
     status: text('status').notNull(),
@@ -137,6 +151,16 @@ export const reminderJobs = pgTable(
     check(
       'reminder_jobs_status_check',
       sql`${table.status} IN ('pending', 'sending', 'awaiting_action', 'completed', 'snoozed', 'cancelled', 'failed')`,
+    ),
+    check(
+      'reminder_jobs_queue_scope_type_check',
+      sql`${table.queueScopeType} IN ('user', 'chat')`,
+    ),
+    index('idx_reminder_jobs_scope_pending_schedule').on(
+      table.queueScopeType,
+      table.queueScopeId,
+      table.status,
+      table.scheduledAt,
     ),
   ],
 );

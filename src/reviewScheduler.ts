@@ -153,7 +153,7 @@ export class ReviewScheduler {
 
   private async sendReminderJobToChannel(input: ReminderJobWithCard) {
     let { job, card } = input;
-    let targetChatId = card.userId;
+    let targetChatId = card.queueScopeType === 'chat' ? card.queueScopeId : card.userId;
     try {
       logger.info(
         `[ReviewScheduler sendReminderJob:start] job=${job.id} kind=${job.kind} card=${card.id} status=${card.status} base=${card.baseChannelMessageId ?? 'null'} pending=${card.pendingChannelMessageId ?? 'null'} source=${card.sourceChatId}:${card.sourceMessageId}`,
@@ -177,8 +177,12 @@ export class ReviewScheduler {
         card = await withDbRetry(() => this.store.getCardById(card.id));
       }
 
-      const user = await withDbRetry(() => this.store.getUser(card.userId));
-      targetChatId = user?.notificationChatId || card.userId;
+      if (card.queueScopeType === 'chat') {
+        targetChatId = card.queueScopeId;
+      } else {
+        const user = await withDbRetry(() => this.store.getUser(card.userId));
+        targetChatId = user?.notificationChatId || card.userId;
+      }
 
       const keyboard = buildReminderJobKeyboard(card.id, job.id, job.kind);
       let pendingMessageId: number;

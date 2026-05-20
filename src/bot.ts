@@ -2,7 +2,13 @@ import dayjs from 'dayjs';
 import { Context, Markup, Telegraf } from 'telegraf';
 import { Update, Message, InlineKeyboardMarkup } from 'telegraf/typings/core/types/typegram';
 import { v4 as uuid } from 'uuid';
-import { CardStore, ReminderMode } from './db';
+import {
+  buildChatQueueScope,
+  buildUserQueueScope,
+  CardStore,
+  ReminderMode,
+} from './db';
+import type { QueueScope } from './db';
 import { config } from './config';
 import { logger } from './logger';
 import {
@@ -90,6 +96,9 @@ const scheduleModeLabel = (mode: ReminderMode, scheduleRule: string | null): str
 };
 
 const SUPPORTED_MESSAGE_SOURCE_TYPES = new Set(['private']);
+const GROUP_MESSAGE_SOURCE_TYPES = new Set(['group', 'supergroup']);
+const CHAT_ADD_COMMAND_PATTERN = /^\/(?:add|learn|remind)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]+))?$/i;
+const DIRECT_MENTION_PATTERN = /^@([A-Za-z0-9_]+)(?:\s+([\s\S]+))?$/;
 const MEDIA_GROUP_DEBOUNCE_MS = 700;
 const MEDIA_GROUP_TTL_MS = 30_000;
 
@@ -109,6 +118,69 @@ interface MediaGroupBuffer {
 
 const isCommandText = (text?: string | null) =>
   Boolean(text && text.startsWith('/'));
+
+const normalizeBotUsername = (username?: string | null) =>
+  username ? username.replace(/^@/, '').toLowerCase() : null;
+
+export const parseAddCommandPayload = (
+  text: string,
+  botUsername?: string | null,
+): string | null => {
+  const match = text.trim().match(CHAT_ADD_COMMAND_PATTERN);
+  if (!match) return null;
+  const targetUsername = normalizeBotUsername(match[1]);
+  const ownUsername = normalizeBotUsername(botUsername);
+  if (targetUsername && (!ownUsername || targetUsername !== ownUsername)) {
+    return null;
+  }
+  return (match[2] ?? '').trim();
+};
+
+export const parseDirectMentionPayload = (
+  text: string,
+  botUsername?: string | null,
+): string | null => {
+  const match = text.trim().match(DIRECT_MENTION_PATTERN);
+  if (!match) return null;
+  const targetUsername = normalizeBotUsername(match[1]);
+  const ownUsername = normalizeBotUsername(botUsername);
+  if (!ownUsername || targetUsername !== ownUsername) {
+    return null;
+  }
+  return (match[2] ?? '').trim();
+};
+
+export const shouldIgnoreUnaddressedGroupMessage = ({
+  chatType,
+  text,
+  botUsername,
+}: {
+  chatType?: string | null;
+  text?: string | null;
+  botUsername?: string | null;
+}) => {
+  if (!chatType || !GROUP_MESSAGE_SOURCE_TYPES.has(chatType)) {
+    return false;
+  }
+  const normalized = text?.trim();
+  if (!normalized) {
+    return true;
+  }
+  if (isCommandText(normalized)) {
+    return false;
+  }
+  return parseDirectMentionPayload(normalized, botUsername) === null;
+};
+
+export const resolveQueueScopeForTelegramChat = (
+  chat: { id: string | number; type: string },
+  userId: string | number,
+): QueueScope => {
+  if (chat.type === 'private') {
+    return buildUserQueueScope(String(userId));
+  }
+  return buildChatQueueScope(chat.id);
+};
 
 const isReviewManagedCard = (status: string): boolean => {
   return status === 'learning' || status === 'awaiting_grade';
@@ -316,6 +388,7 @@ const createPendingCardAndPrompt = async ({
   sourceMessageId,
   sourceMessageIds,
   parsed,
+  queueScope,
   reply,
 }: {
   store: CardStore;
@@ -324,6 +397,7 @@ const createPendingCardAndPrompt = async ({
   sourceMessageId: number;
   sourceMessageIds?: number[] | null;
   parsed: ParsedMessageInfo;
+  queueScope?: QueueScope;
   reply: ReplyFn;
 }) => {
   const cardId = uuid();
@@ -331,6 +405,12 @@ const createPendingCardAndPrompt = async ({
     const pendingInput = {
       id: cardId,
       userId: `${userId}`,
+      ...(queueScope
+        ? {
+            queueScopeType: queueScope.type,
+            queueScopeId: queueScope.id,
+          }
+        : {}),
       sourceChatId: `${chatId}`,
       sourceMessageId,
       ...(sourceMessageIds === undefined ? {} : { sourceMessageIds }),
@@ -633,6 +713,23 @@ export const createBot = (store: CardStore) => {
     }
   };
 
+  // With BotFather privacy mode disabled, Telegram sends all group messages.
+  // Drop ambient group traffic before auth, DB writes, parsers, or logs.
+  bot.use(async (ctx, next) => {
+    const message = ctx.message as Message | undefined;
+    const text = message && 'text' in message ? message.text : null;
+    if (
+      shouldIgnoreUnaddressedGroupMessage({
+        chatType: ctx.chat?.type ?? null,
+        text,
+        botUsername: ctx.botInfo?.username ?? null,
+      })
+    ) {
+      return;
+    }
+    return next();
+  });
+
   // Authorization Middleware
   bot.use(async (ctx, next) => {
     const userId = ctx.from?.id;
@@ -725,8 +822,10 @@ export const createBot = (store: CardStore) => {
   });
 
   bot.command('help', async (ctx) => {
+    const botUsername = ctx.botInfo?.username;
+    const groupMention = botUsername ? `@${botUsername}` : '@bot';
     await ctx.reply(
-      'Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.\n\nКоманды:\n/webapp — открыть приложение для управления карточками\n/use_this_chat — получать напоминания в этот чат (если это группа/канал, добавьте бота админом).',
+      `Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.\n\nКоманды:\n/webapp — открыть приложение для управления карточками\n/use_this_chat — получать личные напоминания в этот чат (если это группа/канал, добавьте бота админом)\n${groupMention} текст — добавить запись в очередь текущего чата.`,
     );
   });
 
@@ -786,6 +885,77 @@ export const createBot = (store: CardStore) => {
         '❌ Не удалось установить этот чат. Убедитесь, что я администратор и имею право писать сообщения.',
       );
     }
+  });
+
+  const createPendingCardFromChatRequest = async (
+    ctx: TelegrafContext,
+    payload: string | null,
+  ) => {
+    const userId = ctx.from?.id;
+    const chat = ctx.chat;
+    const message = ctx.message as Message | undefined;
+    if (!userId || ctx.from?.is_bot || !chat || !message) {
+      return;
+    }
+
+    const replyToMessage =
+      'reply_to_message' in message ? (message.reply_to_message as Message | undefined) : undefined;
+    let parsed: ParsedMessageInfo | null = null;
+    let sourceMessageId = message.message_id;
+
+    if (replyToMessage) {
+      parsed = parseMessage(replyToMessage);
+      sourceMessageId = replyToMessage.message_id;
+    } else if (payload && payload.trim()) {
+      parsed = {
+        contentType: 'text',
+        preview: normalizeContentPreview(payload),
+        fileId: null,
+        fileUniqueId: null,
+      };
+    }
+
+    if (!parsed) {
+      const botUsername = ctx.botInfo?.username;
+      const mention = botUsername ? `@${botUsername}` : '@bot';
+      await ctx.reply(
+        `Чтобы добавить в очередь этого чата, напишите ${mention} текстом или ответьте ${mention} на сообщение.`,
+        { reply_parameters: { message_id: message.message_id } },
+      );
+      return;
+    }
+
+    const queueScope = resolveQueueScopeForTelegramChat(
+      { id: chat.id, type: chat.type },
+      userId,
+    );
+    await createPendingCardAndPrompt({
+      store,
+      userId,
+      chatId: chat.id,
+      sourceMessageId,
+      parsed,
+      queueScope,
+      reply: (text, extra) => ctx.reply(text, extra),
+    });
+  };
+
+  bot.hears(CHAT_ADD_COMMAND_PATTERN, async (ctx, next) => {
+    const text = 'text' in ctx.message ? ctx.message.text : '';
+    const payload = parseAddCommandPayload(text, ctx.botInfo?.username);
+    if (payload === null) {
+      return next();
+    }
+    await createPendingCardFromChatRequest(ctx, payload);
+  });
+
+  bot.hears(DIRECT_MENTION_PATTERN, async (ctx, next) => {
+    const text = 'text' in ctx.message ? ctx.message.text : '';
+    const payload = parseDirectMentionPayload(text, ctx.botInfo?.username);
+    if (payload === null) {
+      return next();
+    }
+    await createPendingCardFromChatRequest(ctx, payload);
   });
 
   bot.on('message', async (ctx) => {
@@ -2129,7 +2299,7 @@ export const createBot = (store: CardStore) => {
         title: '❓ Помощь',
         description: 'Как пользоваться ботом',
         input_message_content: {
-          message_text: 'Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.\n\nКоманды:\n/webapp — открыть приложение для управления карточками\n/use_this_chat — получать напоминания в этот чат.',
+          message_text: `Пошагово:\n1. Отправьте сообщение\n2. Нажмите «Добавить в обучение»\n3. Ждите напоминаний в канале и оценивайте освоение кнопками.\n\nКоманды:\n/webapp — открыть приложение для управления карточками\n/use_this_chat — получать личные напоминания в этот чат\n@${botUsername} текст — добавить запись в очередь текущего чата.`,
         },
       },
     ];

@@ -64,6 +64,13 @@
       "when": 1778326800000,
       "tag": "0008_add_backlog_items",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1779307200000,
+      "tag": "0009_add_queue_scope",
+      "breakpoints": true
     }
   ]
 }
