@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { validate, parse } from '@tma.js/init-data-node';
 import dayjs from 'dayjs';
 import express, {
@@ -36,6 +36,7 @@ import {
   normalizeCourseDraft,
 } from './courseAuthoring';
 import { config } from './config';
+import { parseHouseholdReminderText } from './householdReminder';
 import { logger } from './logger';
 import { getPublicBaseUrl } from './publicUrl';
 import { ReminderRebalancePreviewChange } from './reminderRebalance';
@@ -1392,6 +1393,69 @@ export const createHttpServer = (
     } catch (error) {
       logger.error('Error loading cards for Mini App', error);
       res.status(500).json({ error: 'Failed to load cards' });
+    }
+  });
+
+  app.post('/api/miniapp/reminders', requireMiniAppAuth, async (req, res) => {
+    const userId = (req as any).userId;
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    if (!text || text.length > 1000) {
+      res.status(400).json({ error: 'Введите текст напоминания до 1000 символов' });
+      return;
+    }
+
+    const plan = parseHouseholdReminderText(text);
+    if (!plan) {
+      res.status(400).json({
+        error: 'Не удалось понять время. Примеры: «купить молоко завтра», «принять витамин каждый день в 9», «день рождения мамы 25.05».',
+      });
+      return;
+    }
+
+    try {
+      await withDbRetry(() => store.ensureUser(userId));
+      const card = await withDbRetry(() =>
+        store.createPendingCard({
+          id: randomUUID(),
+          userId,
+          queueScopeType: 'user',
+          queueScopeId: userId,
+          sourceChatId: userId,
+          sourceMessageId: 0,
+          contentType: 'text',
+          contentPreview: plan.title,
+          contentFileId: null,
+          contentFileUniqueId: null,
+          reminderMode: plan.mode === 'schedule' ? 'schedule' : 'sm2',
+          scheduleRule: plan.mode === 'schedule' ? plan.scheduleRule : null,
+        }),
+      );
+
+      if (plan.mode === 'one_time') {
+        await withDbRetry(() => store.updateStatus(card.id, 'learning'));
+        const job = await withDbRetry(() =>
+          store.createReminderJob({
+            cardId: card.id,
+            userId,
+            kind: 'one_time',
+            dueAt: plan.remindAt,
+            source: `miniapp_household_${plan.kind}`,
+            metadata: JSON.stringify({ household: true, kind: plan.kind, mode: plan.mode }),
+          }),
+        );
+        const updated = await withDbRetry(() => store.getCardById(card.id));
+        res.json({ ok: true, data: { card: updated, job, plan } });
+        return;
+      }
+
+      const updated = await withDbRetry(() =>
+        store.activateCard(card.id, { nextReviewAt: plan.nextReviewAt }),
+      );
+      res.json({ ok: true, data: { card: updated, job: null, plan } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось создать напоминание';
+      logger.error('Error creating Mini App household reminder', error);
+      res.status(500).json({ error: message });
     }
   });
 

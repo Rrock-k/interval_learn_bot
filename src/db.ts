@@ -640,6 +640,18 @@ export class CardStore {
     );
   }
 
+  async ensureUser(id: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.pool.query(
+      `
+      INSERT INTO users (id, status, notification_chat_id, created_at, updated_at)
+      VALUES ($1, 'pending', $1, $2, $2)
+      ON CONFLICT (id) DO NOTHING
+    `,
+      [id, now],
+    );
+  }
+
   async getUser(id: string): Promise<{
     status: 'pending' | 'approved' | 'rejected';
     notificationChatId: string | null;

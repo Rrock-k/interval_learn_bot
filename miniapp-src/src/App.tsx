@@ -10,12 +10,15 @@ import {
   Clipboard,
   Clock3,
   Copy,
+  Gift,
   Link2,
   MoreHorizontal,
+  Pill,
   Play,
   Plus,
   RotateCcw,
   Search,
+  ShoppingCart,
 } from 'lucide-react';
 import {
   Accordion,
@@ -43,7 +46,7 @@ import { cn } from './lib/utils';
 import { buildMessageLink, getMessageLink } from './linkUtils';
 
 type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
-type ViewName = 'queue' | 'courses' | 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
+type ViewName = 'create' | 'queue' | 'courses' | 'cards' | 'calendar' | 'stats' | 'balance' | 'card-detail' | 'notification-detail';
 type SortMode = 'nextReviewAsc' | 'nextReviewDesc' | 'updatedDesc' | 'repetitionDesc';
 type NotificationReason = 'scheduled' | 'manual_now' | 'manual_override' | 'one_time';
 
@@ -153,6 +156,29 @@ type ReminderQueueItem = {
 };
 
 type QueueAction = 'viewed' | 'not-viewed' | 'again' | 'reschedule' | 'archive';
+
+type HouseholdReminderKind = 'shopping' | 'medicine' | 'birthday' | 'general';
+
+type HouseholdReminderPlan =
+  | {
+      mode: 'one_time';
+      kind: HouseholdReminderKind;
+      title: string;
+      remindAt: string;
+    }
+  | {
+      mode: 'schedule';
+      kind: HouseholdReminderKind;
+      title: string;
+      ruleText: string;
+      nextReviewAt: string;
+    };
+
+type CreatedHouseholdReminder = {
+  card: CardRecord;
+  job: ReminderJobRecord | null;
+  plan: HouseholdReminderPlan;
+};
 
 type CourseStepKind = 'material' | 'practice' | 'question';
 
@@ -416,7 +442,7 @@ async function copyText(value: string) {
 }
 
 export function App() {
-  const [view, setView] = useState<ViewName>('queue');
+  const [view, setView] = useState<ViewName>('create');
   const [cards, setCards] = useState<CardRecord[]>([]);
   const [queueItems, setQueueItems] = useState<ReminderQueueItem[]>([]);
   const [queueLoading, setQueueLoading] = useState(false);
@@ -453,14 +479,18 @@ export function App() {
         : view === 'courses'
           ? 'Курсы'
         : view === 'calendar'
-          ? 'Календарь'
-        : view === 'stats'
+      ? 'Календарь'
+      : view === 'stats'
             ? 'Статистика'
             : view === 'queue'
               ? 'Очередь'
+              : view === 'create'
+                ? 'Создать'
               : 'Мои карточки';
   const screenSubtitle =
-    view === 'queue'
+    view === 'create'
+      ? 'Быстрое бытовое напоминание: покупки, лекарства, дни рождения.'
+      : view === 'queue'
       ? 'Потяните следующую карточку, когда готовы посмотреть.'
       : view === 'courses'
         ? 'Создайте простой курс и запустите шаги в очередь.'
@@ -596,7 +626,7 @@ export function App() {
       setSelectedCardId(deepLink.cardId);
       setView('notification-detail');
     }
-    if (deepLink.type === 'view' && ['queue', 'courses', 'cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
+    if (deepLink.type === 'view' && ['create', 'queue', 'courses', 'cards', 'calendar', 'stats', 'balance'].includes(deepLink.view)) {
       setView(deepLink.view);
     }
   }, [loading, cards.length]);
@@ -800,6 +830,24 @@ export function App() {
     }
   };
 
+  const createHouseholdReminder = async (text: string): Promise<CreatedHouseholdReminder> => {
+    setBusyKey('reminder:create');
+    try {
+      const result = await apiCall<{ data: CreatedHouseholdReminder }>('/api/miniapp/reminders', {
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      });
+      tg.HapticFeedback?.notificationOccurred?.('success');
+      await loadCards('all');
+      if (demo || profile?.ownerTools) {
+        await loadQueue();
+      }
+      return result.data;
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const createCourse = async (input: { title: string; description: string | null; steps: CourseStepDraft[] }) => {
     setBusyKey('course:create');
     try {
@@ -854,7 +902,8 @@ export function App() {
 
       {view !== 'card-detail' && view !== 'notification-detail' ? (
         <Tabs value={view} onValueChange={(value) => setView(value as ViewName)} className="app-tabs">
-          <TabsList className={ownerToolsAvailable ? 'tabs-count-6' : undefined}>
+          <TabsList className={ownerToolsAvailable ? 'tabs-count-7' : 'tabs-count-4'}>
+            <TabsTrigger value="create">Создать</TabsTrigger>
             {ownerToolsAvailable ? <TabsTrigger value="queue">Очередь</TabsTrigger> : null}
             {ownerToolsAvailable ? <TabsTrigger value="courses">Курсы</TabsTrigger> : null}
             <TabsTrigger value="cards">Карточки</TabsTrigger>
@@ -866,6 +915,17 @@ export function App() {
       ) : null}
 
       <main className="app-main" key={view}>
+        {view === 'create' ? (
+          <CreateReminderScreen
+            busy={busyKey === 'reminder:create'}
+            onCreate={createHouseholdReminder}
+            onOpenCard={(card) => {
+              setSelectedCardId(card.id);
+              setView('card-detail');
+            }}
+          />
+        ) : null}
+
         {view === 'queue' && ownerToolsAvailable ? (
           <QueueScreen
             items={queueItems}
@@ -982,6 +1042,104 @@ export function App() {
 }
 
 const QUEUE_PULL_THRESHOLD = 0.45;
+
+const reminderTemplates: Array<{
+  icon: typeof ShoppingCart;
+  label: string;
+  text: string;
+}> = [
+  { icon: ShoppingCart, label: 'Покупки', text: 'Купить молоко завтра в 10' },
+  { icon: Pill, label: 'Лекарство', text: 'Принять витамин каждый день в 9' },
+  { icon: Gift, label: 'День рождения', text: 'День рождения мамы 25.05' },
+];
+
+function CreateReminderScreen({
+  busy,
+  onCreate,
+  onOpenCard,
+}: {
+  busy: boolean;
+  onCreate: (text: string) => Promise<CreatedHouseholdReminder>;
+  onOpenCard: (card: CardRecord) => void;
+}) {
+  const [text, setText] = useState('');
+  const [created, setCreated] = useState<CreatedHouseholdReminder | null>(null);
+  const canCreate = text.trim().length > 0;
+
+  const submit = async () => {
+    if (!canCreate) {
+      showAlert('Напишите напоминание');
+      return;
+    }
+    try {
+      const result = await onCreate(text.trim());
+      setCreated(result);
+      setText('');
+      showAlert('Напоминание создано');
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : 'Не удалось создать напоминание');
+    }
+  };
+
+  return (
+    <div className="create-reminder-stack">
+      <Card className="quick-create-card">
+        <div className="settings-heading">
+          <div>
+            <h2>Быстрое напоминание</h2>
+            <p>Напишите обычной фразой с датой или расписанием.</p>
+          </div>
+          <Bell size={20} />
+        </div>
+        <textarea
+          className="ui-textarea quick-create-input"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="Например: купить молоко завтра в 10"
+        />
+        <div className="quick-template-grid">
+          {reminderTemplates.map((template) => {
+            const Icon = template.icon;
+            return (
+              <button
+                type="button"
+                key={template.label}
+                className="quick-template"
+                onClick={() => setText(template.text)}
+              >
+                <Icon size={16} />
+                <span>{template.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <Button disabled={busy || !canCreate} onClick={() => void submit()}>
+          <Plus size={16} />
+          Создать
+        </Button>
+      </Card>
+
+      {created ? (
+        <Card className="created-reminder-card">
+          <div>
+            <Badge tone={created.plan.mode === 'one_time' ? 'muted' : 'inverse'}>
+              {created.plan.mode === 'one_time' ? 'одноразовое' : 'регулярное'}
+            </Badge>
+            <h2>{created.plan.title}</h2>
+            <p>
+              {created.plan.mode === 'one_time'
+                ? `Напомню ${formatDateTime(created.plan.remindAt)}`
+                : `${created.plan.ruleText}. Следующее ${formatDateTime(created.plan.nextReviewAt)}`}
+            </p>
+          </div>
+          <Button variant="outline" onClick={() => onOpenCard(created.card)}>
+            Открыть карточку
+          </Button>
+        </Card>
+      ) : null}
+    </div>
+  );
+}
 
 function CoursesScreen({
   courses,
@@ -2080,6 +2238,44 @@ async function demoResponse<T>(
 ) {
   const source = cards.length ? cards : demoCards;
   if (endpoint.includes('/me')) return { data: { userId: 'demo', ownerTools: true } } as T;
+  if (endpoint.endsWith('/api/miniapp/reminders') && options.method === 'POST') {
+    const input = typeof options.body === 'string' ? JSON.parse(options.body) : {};
+    const rawText = String(input.text ?? 'Напоминание');
+    const lower = rawText.toLowerCase();
+    const mode = /(каждый|ежедневно|день рождения|\bдр\b)/i.test(lower) ? 'schedule' : 'one_time';
+    const now = new Date();
+    const next = new Date(now.getTime() + (mode === 'schedule' ? 24 : 2) * 60 * 60_000).toISOString();
+    const card: CardRecord = {
+      id: `demo-reminder-${Date.now()}`,
+      sourceChatId: 'demo',
+      sourceMessageId: 0,
+      contentType: 'text',
+      contentPreview: rawText.replace(/\s+/g, ' ').trim(),
+      status: 'learning',
+      repetition: 0,
+      nextReviewAt: mode === 'schedule' ? next : null,
+      lastReviewedAt: null,
+      pendingChannelId: null,
+      pendingChannelMessageId: null,
+      baseChannelMessageId: null,
+      awaitingGradeSince: null,
+      lastNotificationAt: null,
+      lastNotificationReason: null,
+      lastNotificationMessageId: null,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+    setCards((items) => [card, ...(items.length ? items : demoCards)]);
+    return {
+      data: {
+        card,
+        job: null,
+        plan: mode === 'schedule'
+          ? { mode, kind: 'general', title: card.contentPreview || 'Напоминание', ruleText: 'Регулярно', nextReviewAt: next }
+          : { mode, kind: 'general', title: card.contentPreview || 'Напоминание', remindAt: next },
+      },
+    } as T;
+  }
   if (endpoint.includes('/courses/') && endpoint.includes('/start')) {
     const courseId = endpoint.match(/\/courses\/([^/]+)\/start/)?.[1] ?? '';
     setCourses((items) =>

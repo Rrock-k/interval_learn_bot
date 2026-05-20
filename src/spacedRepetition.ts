@@ -50,9 +50,13 @@ export const computeReview = (card: CardRecord, grade: GradeKey): ReviewComputat
   if (card.reminderMode === 'schedule') {
     const rule = parseScheduleRule(card.scheduleRule);
     if (rule) {
+      const basis =
+        card.nextReviewAt && dayjs(card.nextReviewAt).isAfter(now)
+          ? dayjs(card.nextReviewAt)
+          : now;
       return {
         repetition: (card.repetition ?? 0) + 1,
-        nextReviewAt: computeNextFromSchedule(rule),
+        nextReviewAt: computeNextFromSchedule(rule, basis),
       };
     }
     // Fallback: if no rule, treat as daily

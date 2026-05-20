@@ -3,10 +3,11 @@ import dayjs from 'dayjs';
 // --- Types ---
 
 export type ScheduleRule =
-  | { type: 'days'; interval: number }
-  | { type: 'months'; interval: number }
-  | { type: 'years'; interval: number }
-  | { type: 'weekdays'; days: number[] }; // 1=Пн..7=Вс
+  | { type: 'days'; interval: number; timeMinutes?: number }
+  | { type: 'months'; interval: number; timeMinutes?: number }
+  | { type: 'years'; interval: number; timeMinutes?: number }
+  | { type: 'weekdays'; days: number[]; timeMinutes?: number } // 1=Пн..7=Вс
+  | { type: 'annual_date'; month: number; day: number; timeMinutes?: number };
 
 // --- Presets (used in bot keyboards) ---
 
@@ -47,25 +48,58 @@ export const formatWeekdays = (days: number[]): string =>
 
 // --- Compute next date from schedule ---
 
-export const computeNextFromSchedule = (rule: ScheduleRule): string => {
-  const now = dayjs();
+export const computeNextFromSchedule = (
+  rule: ScheduleRule,
+  after: dayjs.Dayjs = dayjs(),
+): string => {
+  const now = after.second(0).millisecond(0);
 
   switch (rule.type) {
     case 'days':
-      return now.add(rule.interval, 'day').toISOString();
+      return computeNextInterval(now, rule.interval, 'day', rule.timeMinutes).toISOString();
 
     case 'months':
-      return now.add(rule.interval, 'month').toISOString();
+      return computeNextInterval(now, rule.interval, 'month', rule.timeMinutes).toISOString();
 
     case 'years':
-      return now.add(rule.interval, 'year').toISOString();
+      return computeNextInterval(now, rule.interval, 'year', rule.timeMinutes).toISOString();
 
     case 'weekdays':
-      return computeNextWeekday(now, rule.days).toISOString();
+      return computeNextWeekday(now, rule.days, rule.timeMinutes).toISOString();
+
+    case 'annual_date':
+      return computeNextAnnualDate(now, rule.month, rule.day, rule.timeMinutes).toISOString();
   }
 };
 
-const computeNextWeekday = (now: dayjs.Dayjs, weekdays: number[]): dayjs.Dayjs => {
+const applyTime = (date: dayjs.Dayjs, timeMinutes: number | undefined): dayjs.Dayjs => {
+  if (!Number.isInteger(timeMinutes)) {
+    return date;
+  }
+  const clamped = Math.min(1439, Math.max(0, timeMinutes ?? 0));
+  return date.hour(Math.floor(clamped / 60)).minute(clamped % 60).second(0).millisecond(0);
+};
+
+const computeNextInterval = (
+  now: dayjs.Dayjs,
+  interval: number,
+  unit: dayjs.ManipulateType,
+  timeMinutes: number | undefined,
+): dayjs.Dayjs => {
+  if (Number.isInteger(timeMinutes)) {
+    const todayAtTime = applyTime(now, timeMinutes);
+    if (todayAtTime.isAfter(now)) {
+      return todayAtTime;
+    }
+  }
+  return applyTime(now.add(Math.max(1, interval), unit), timeMinutes);
+};
+
+const computeNextWeekday = (
+  now: dayjs.Dayjs,
+  weekdays: number[],
+  timeMinutes: number | undefined,
+): dayjs.Dayjs => {
   if (!weekdays.length) return now.add(1, 'day');
 
   const sorted = [...weekdays].sort((a, b) => a - b);
@@ -73,14 +107,38 @@ const computeNextWeekday = (now: dayjs.Dayjs, weekdays: number[]): dayjs.Dayjs =
   const todayIso = now.day() === 0 ? 7 : now.day();
 
   for (const wd of sorted) {
-    if (wd > todayIso) {
+    if (wd >= todayIso) {
       const diff = wd - todayIso;
-      return now.add(diff, 'day');
+      const candidate = applyTime(now.add(diff, 'day'), timeMinutes);
+      if (candidate.isAfter(now)) {
+        return candidate;
+      }
     }
   }
   // All weekdays ≤ today → go to next week's first weekday
   const diff = 7 - todayIso + (sorted[0] ?? 1);
-  return now.add(diff, 'day');
+  return applyTime(now.add(diff, 'day'), timeMinutes);
+};
+
+const computeNextAnnualDate = (
+  now: dayjs.Dayjs,
+  month: number,
+  day: number,
+  timeMinutes: number | undefined,
+): dayjs.Dayjs => {
+  const build = (year: number) =>
+    applyTime(
+      dayjs(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00`),
+      timeMinutes ?? 9 * 60,
+    );
+  let candidate = build(now.year());
+  if (!candidate.isValid() || candidate.month() + 1 !== month || candidate.date() !== day) {
+    candidate = build(now.year() + 1);
+  }
+  if (!candidate.isAfter(now)) {
+    candidate = build(now.year() + 1);
+  }
+  return candidate;
 };
 
 // --- Serialize / parse ---
@@ -140,19 +198,19 @@ export const parseNaturalSchedule = (input: string): ScheduleRule | null => {
   if (!text) return null;
 
   // --- Fixed phrases ---
-  if (/^(каждый день|ежедневно)$/.test(text)) {
+  if (/(^|\s)(каждый день|ежедневно)(\s|$)/.test(text)) {
     return { type: 'days', interval: 1 };
   }
-  if (/^через день$/.test(text)) {
+  if (/(^|\s)через день(\s|$)/.test(text)) {
     return { type: 'days', interval: 2 };
   }
-  if (/^(каждую неделю|еженедельно|через неделю)$/.test(text)) {
+  if (/(^|\s)(каждую неделю|еженедельно|через неделю)(\s|$)/.test(text)) {
     return { type: 'days', interval: 7 };
   }
-  if (/^(каждый месяц|ежемесячно|через месяц)$/.test(text)) {
+  if (/(^|\s)(каждый месяц|ежемесячно|через месяц)(\s|$)/.test(text)) {
     return { type: 'months', interval: 1 };
   }
-  if (/^(каждый год|ежегодно|через год)$/.test(text)) {
+  if (/(^|\s)(каждый год|ежегодно|через год)(\s|$)/.test(text)) {
     return { type: 'years', interval: 1 };
   }
 
@@ -241,22 +299,38 @@ const extractWeekdays = (text: string): number[] => {
 
 // --- Human-readable label ---
 
+export const formatTimeMinutes = (timeMinutes: number | undefined): string | null => {
+  if (!Number.isInteger(timeMinutes)) return null;
+  const clamped = Math.min(1439, Math.max(0, timeMinutes ?? 0));
+  return `${String(Math.floor(clamped / 60)).padStart(2, '0')}:${String(clamped % 60).padStart(2, '0')}`;
+};
+
+const withTimeLabel = (label: string, timeMinutes: number | undefined): string => {
+  const time = formatTimeMinutes(timeMinutes);
+  return time ? `${label} в ${time}` : label;
+};
+
 export const scheduleRuleLabel = (rule: ScheduleRule): string => {
   switch (rule.type) {
     case 'days': {
       const preset = SCHEDULE_PRESETS.find(
         (p) => p.rule.type === 'days' && p.rule.interval === rule.interval,
       );
-      if (preset) return preset.label;
-      return `Каждые ${rule.interval} дн.`;
+      if (preset) return withTimeLabel(preset.label, rule.timeMinutes);
+      return withTimeLabel(`Каждые ${rule.interval} дн.`, rule.timeMinutes);
     }
     case 'months':
-      if (rule.interval === 1) return 'Каждый месяц';
-      return `Каждые ${rule.interval} мес.`;
+      if (rule.interval === 1) return withTimeLabel('Каждый месяц', rule.timeMinutes);
+      return withTimeLabel(`Каждые ${rule.interval} мес.`, rule.timeMinutes);
     case 'years':
-      if (rule.interval === 1) return 'Каждый год';
-      return `Каждые ${rule.interval} г.`;
+      if (rule.interval === 1) return withTimeLabel('Каждый год', rule.timeMinutes);
+      return withTimeLabel(`Каждые ${rule.interval} г.`, rule.timeMinutes);
     case 'weekdays':
-      return formatWeekdays(rule.days);
+      return withTimeLabel(formatWeekdays(rule.days), rule.timeMinutes);
+    case 'annual_date':
+      return withTimeLabel(
+        `Каждый год ${String(rule.day).padStart(2, '0')}.${String(rule.month).padStart(2, '0')}`,
+        rule.timeMinutes ?? 9 * 60,
+      );
   }
 };
