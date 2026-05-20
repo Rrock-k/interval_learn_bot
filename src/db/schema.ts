@@ -181,17 +181,28 @@ export const courses = pgTable(
   {
     id: text('id').primaryKey(),
     ownerUserId: text('owner_user_id').notNull(),
+    ownerAppUserId: text('owner_app_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     description: text('description'),
     status: text('status').notNull().default('draft'),
+    visibility: text('visibility').notNull().default('private'),
+    publicSlug: text('public_slug'),
+    publishedAt: text('published_at'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
   (table) => [
     index('idx_courses_owner_status').on(table.ownerUserId, table.status),
+    index('idx_courses_owner_app_user').on(table.ownerAppUserId),
+    uniqueIndex('idx_courses_public_slug').on(table.publicSlug),
+    index('idx_courses_visibility_published').on(table.visibility, table.publishedAt),
     check(
       'courses_status_check',
       sql`${table.status} IN ('draft', 'active', 'archived')`,
+    ),
+    check(
+      'courses_visibility_check',
+      sql`${table.visibility} IN ('private', 'public')`,
     ),
   ],
 );

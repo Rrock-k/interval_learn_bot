@@ -12,6 +12,7 @@ import {
   buildReminderRebalancePreview,
 } from './reminderRebalance';
 import { buildCourseStepCardText, CourseStepKind } from './courses';
+import { slugifyCourseTitle } from './courseMarketplace';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 export type BacklogItemStatus = 'open' | 'done' | 'archived';
@@ -29,6 +30,7 @@ export type QueueScopeType = 'user' | 'chat';
 export type CourseStatus = 'draft' | 'active' | 'archived';
 export type CourseEnrollmentStatus = 'active' | 'completed' | 'paused' | 'archived';
 export type CourseCadence = 'after_view' | 'daily';
+export type CourseVisibility = 'private' | 'public';
 export type AuthProvider = 'telegram' | 'google';
 
 export interface QueueScope {
@@ -183,9 +185,13 @@ export interface ReminderQueueItem {
 export interface CourseRecord {
   id: string;
   ownerUserId: string;
+  ownerAppUserId: string | null;
   title: string;
   description: string | null;
   status: CourseStatus;
+  visibility: CourseVisibility;
+  publicSlug: string | null;
+  publishedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -247,6 +253,15 @@ export interface CourseSummaryRecord extends CourseRecord {
   stepCount: number;
   activeEnrollmentCount: number;
   completedEnrollmentCount: number;
+}
+
+export interface CourseMarketplaceRecord extends CourseSummaryRecord {
+  creatorName: string | null;
+  creatorAvatarUrl: string | null;
+}
+
+export interface CourseDetailsRecord extends CourseMarketplaceRecord {
+  steps: CourseStepRecord[];
 }
 
 export interface AppUserRecord {
@@ -435,11 +450,28 @@ const rowToReminderJob = (row: any): ReminderJobRecord => ({
 const rowToCourse = (row: any): CourseRecord => ({
   id: row.id,
   ownerUserId: row.owner_user_id,
+  ownerAppUserId: row.owner_app_user_id ?? null,
   title: row.title,
   description: row.description ?? null,
   status: row.status as CourseStatus,
+  visibility: (row.visibility ?? 'private') as CourseVisibility,
+  publicSlug: row.public_slug ?? null,
+  publishedAt: row.published_at ?? null,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+});
+
+const rowToCourseSummary = (row: any): CourseSummaryRecord => ({
+  ...rowToCourse(row),
+  stepCount: Number(row.step_count ?? 0),
+  activeEnrollmentCount: Number(row.active_enrollment_count ?? 0),
+  completedEnrollmentCount: Number(row.completed_enrollment_count ?? 0),
+});
+
+const rowToCourseMarketplace = (row: any): CourseMarketplaceRecord => ({
+  ...rowToCourseSummary(row),
+  creatorName: row.creator_name ?? null,
+  creatorAvatarUrl: row.creator_avatar_url ?? null,
 });
 
 const rowToCourseStep = (row: any): CourseStepRecord => ({
@@ -522,6 +554,28 @@ const buildPoolConfig = (connectionString: string): PoolConfig => {
     connectionString,
     ssl: sslRequired ? { rejectUnauthorized: false } : undefined,
     max: Number(process.env.PGPOOL_MAX ?? 10),
+  };
+};
+
+const resolveCoursePublication = (input: {
+  title: string;
+  visibility?: CourseVisibility | undefined;
+  publicSlug?: string | null | undefined;
+  publishedAt?: string | null | undefined;
+  now: string;
+}) => {
+  const visibility = input.visibility ?? 'private';
+  if (visibility !== 'public') {
+    return {
+      visibility,
+      publicSlug: null,
+      publishedAt: null,
+    };
+  }
+  return {
+    visibility,
+    publicSlug: input.publicSlug?.trim() || `${slugifyCourseTitle(input.title)}-${uuid().slice(0, 8)}`,
+    publishedAt: input.publishedAt ?? input.now,
   };
 };
 
@@ -1333,26 +1387,43 @@ export class CardStore {
   async createCourse(input: {
     id?: string;
     ownerUserId: string;
+    ownerAppUserId?: string | null;
     title: string;
     description?: string | null;
     status?: CourseStatus;
+    visibility?: CourseVisibility;
+    publicSlug?: string | null;
+    publishedAt?: string | null;
   }): Promise<CourseRecord> {
     const now = new Date().toISOString();
+    const publication = resolveCoursePublication({
+      title: input.title,
+      visibility: input.visibility,
+      publicSlug: input.publicSlug,
+      publishedAt: input.publishedAt,
+      now,
+    });
     const { rows } = await this.pool.query(
       `
       INSERT INTO courses (
-        id, owner_user_id, title, description, status, created_at, updated_at
+        id, owner_user_id, owner_app_user_id, title, description, status,
+        visibility, public_slug, published_at, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $6
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, $10
       )
       RETURNING *
     `,
       [
         input.id ?? uuid(),
         input.ownerUserId,
+        input.ownerAppUserId ?? null,
         input.title.trim(),
         input.description?.trim() || null,
         input.status ?? 'draft',
+        publication.visibility,
+        publication.publicSlug,
+        publication.publishedAt,
         now,
       ],
     );
@@ -1412,12 +1483,69 @@ export class CardStore {
     `,
       [ownerUserId],
     );
-    return rows.map((row) => ({
-      ...rowToCourse(row),
-      stepCount: Number(row.step_count ?? 0),
-      activeEnrollmentCount: Number(row.active_enrollment_count ?? 0),
-      completedEnrollmentCount: Number(row.completed_enrollment_count ?? 0),
-    }));
+    return rows.map(rowToCourseSummary);
+  }
+
+  async listCourseSummariesByAppUser(appUserId: string): Promise<CourseMarketplaceRecord[]> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT courses.*,
+             app_users.display_name AS creator_name,
+             app_users.avatar_url AS creator_avatar_url,
+             COUNT(DISTINCT course_steps.id) AS step_count,
+             COUNT(DISTINCT active_enrollments.id) AS active_enrollment_count,
+             COUNT(DISTINCT completed_enrollments.id) AS completed_enrollment_count
+      FROM courses
+      LEFT JOIN app_users
+        ON app_users.id = courses.owner_app_user_id
+      LEFT JOIN course_steps
+        ON course_steps.course_id = courses.id
+      LEFT JOIN course_enrollments active_enrollments
+        ON active_enrollments.course_id = courses.id
+       AND active_enrollments.status = 'active'
+      LEFT JOIN course_enrollments completed_enrollments
+        ON completed_enrollments.course_id = courses.id
+       AND completed_enrollments.status = 'completed'
+      WHERE courses.owner_app_user_id = $1
+        AND courses.status <> 'archived'
+      GROUP BY courses.id, app_users.id
+      ORDER BY courses.updated_at DESC
+    `,
+      [appUserId],
+    );
+    return rows.map(rowToCourseMarketplace);
+  }
+
+  async listMarketplaceCourses(params: { limit?: number } = {}): Promise<CourseMarketplaceRecord[]> {
+    const limit = Math.min(100, Math.max(1, params.limit ?? 50));
+    const { rows } = await this.pool.query(
+      `
+      SELECT courses.*,
+             app_users.display_name AS creator_name,
+             app_users.avatar_url AS creator_avatar_url,
+             COUNT(DISTINCT course_steps.id) AS step_count,
+             COUNT(DISTINCT active_enrollments.id) AS active_enrollment_count,
+             COUNT(DISTINCT completed_enrollments.id) AS completed_enrollment_count
+      FROM courses
+      LEFT JOIN app_users
+        ON app_users.id = courses.owner_app_user_id
+      LEFT JOIN course_steps
+        ON course_steps.course_id = courses.id
+      LEFT JOIN course_enrollments active_enrollments
+        ON active_enrollments.course_id = courses.id
+       AND active_enrollments.status = 'active'
+      LEFT JOIN course_enrollments completed_enrollments
+        ON completed_enrollments.course_id = courses.id
+       AND completed_enrollments.status = 'completed'
+      WHERE courses.visibility = 'public'
+        AND courses.status = 'active'
+      GROUP BY courses.id, app_users.id
+      ORDER BY courses.published_at DESC NULLS LAST, courses.updated_at DESC
+      LIMIT $1
+    `,
+      [limit],
+    );
+    return rows.map(rowToCourseMarketplace);
   }
 
   async findCourseById(courseId: string): Promise<CourseRecord | null> {
@@ -1436,11 +1564,61 @@ export class CardStore {
     throw new Error(`Course ${courseId} not found`);
   }
 
+  async getPublicCourseDetailsBySlug(slug: string): Promise<CourseDetailsRecord | null> {
+    const { rows } = await this.pool.query(
+      `
+      SELECT courses.*,
+             app_users.display_name AS creator_name,
+             app_users.avatar_url AS creator_avatar_url,
+             COUNT(DISTINCT course_steps.id) AS step_count,
+             COUNT(DISTINCT active_enrollments.id) AS active_enrollment_count,
+             COUNT(DISTINCT completed_enrollments.id) AS completed_enrollment_count
+      FROM courses
+      LEFT JOIN app_users
+        ON app_users.id = courses.owner_app_user_id
+      LEFT JOIN course_steps
+        ON course_steps.course_id = courses.id
+      LEFT JOIN course_enrollments active_enrollments
+        ON active_enrollments.course_id = courses.id
+       AND active_enrollments.status = 'active'
+      LEFT JOIN course_enrollments completed_enrollments
+        ON completed_enrollments.course_id = courses.id
+       AND completed_enrollments.status = 'completed'
+      WHERE courses.public_slug = $1
+        AND courses.visibility = 'public'
+        AND courses.status = 'active'
+      GROUP BY courses.id, app_users.id
+    `,
+      [slug],
+    );
+    if (!rows.length) {
+      return null;
+    }
+    const course = rowToCourseMarketplace(rows[0]);
+    const { rows: stepRows } = await this.pool.query(
+      `
+      SELECT *
+      FROM course_steps
+      WHERE course_id = $1
+      ORDER BY position ASC
+    `,
+      [course.id],
+    );
+    return {
+      ...course,
+      steps: stepRows.map(rowToCourseStep),
+    };
+  }
+
   async createCourseWithSteps(input: {
     ownerUserId: string;
+    ownerAppUserId?: string | null;
     title: string;
     description?: string | null;
     status?: CourseStatus;
+    visibility?: CourseVisibility;
+    publicSlug?: string | null;
+    publishedAt?: string | null;
     steps: Array<{
       kind?: CourseStepKind;
       title: string;
@@ -1449,23 +1627,36 @@ export class CardStore {
   }): Promise<{ course: CourseRecord; steps: CourseStepRecord[] }> {
     const client = await this.pool.connect();
     const now = new Date().toISOString();
+    const publication = resolveCoursePublication({
+      title: input.title,
+      visibility: input.visibility,
+      publicSlug: input.publicSlug,
+      publishedAt: input.publishedAt,
+      now,
+    });
     try {
       await client.query('BEGIN');
       const { rows: courseRows } = await client.query(
         `
         INSERT INTO courses (
-          id, owner_user_id, title, description, status, created_at, updated_at
+          id, owner_user_id, owner_app_user_id, title, description, status,
+          visibility, public_slug, published_at, created_at, updated_at
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $6
+          $1, $2, $3, $4, $5, $6,
+          $7, $8, $9, $10, $10
         )
         RETURNING *
       `,
         [
           uuid(),
           input.ownerUserId,
+          input.ownerAppUserId ?? null,
           input.title.trim(),
           input.description?.trim() || null,
           input.status ?? 'active',
+          publication.visibility,
+          publication.publicSlug,
+          publication.publishedAt,
           now,
         ],
       );

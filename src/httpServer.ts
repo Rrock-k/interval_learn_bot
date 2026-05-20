@@ -21,6 +21,9 @@ import {
   CardStatus,
   CardStore,
   CourseCadence,
+  CourseDetailsRecord,
+  CourseMarketplaceRecord,
+  CourseVisibility,
   ReminderJobRecord,
   UserAuthAccountRecord,
   UserReminderSettings,
@@ -169,6 +172,63 @@ const parseCoursePayload = (body: unknown) => {
     return null;
   }
   return { title, description, steps };
+};
+
+type CourseFormPayload = {
+  title: string;
+  description: string | null;
+  visibility: CourseVisibility;
+  steps: Array<{
+    kind: CourseStepKind;
+    title: string;
+    body: string;
+  }>;
+};
+
+const parseCourseStepsText = (value: unknown) => {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return [];
+  return text
+    .split(/\n\s*\n/g)
+    .map((block) => block.split('\n').map((line) => line.trim()).filter(Boolean))
+    .map((lines) => {
+      const title = lines[0] ?? '';
+      const body = lines.slice(1).join('\n\n').trim();
+      return {
+        kind: 'material' as CourseStepKind,
+        title,
+        body,
+      };
+    })
+    .filter((step) => step.title && step.body);
+};
+
+const parseCourseFormPayload = (body: unknown): { data?: CourseFormPayload; error?: string } => {
+  const input = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  const description = typeof input.description === 'string' && input.description.trim()
+    ? input.description.trim()
+    : null;
+  const visibility: CourseVisibility = input.visibility === 'public' ? 'public' : 'private';
+  const steps = parseCourseStepsText(input.stepsText);
+
+  if (!title) {
+    return { error: 'Название курса обязательно.' };
+  }
+  if (steps.length === 0) {
+    return { error: 'Добавьте хотя бы один шаг: первая строка блока — заголовок, дальше текст шага.' };
+  }
+  if (steps.length > 100) {
+    return { error: 'В одном курсе пока максимум 100 шагов.' };
+  }
+  return {
+    data: {
+      title,
+      description,
+      visibility,
+      steps,
+    },
+  };
 };
 
 const parseQueueDelayMinutes = (value: unknown, fallback: number) => {
@@ -552,6 +612,174 @@ export const createHttpServer = (
         accounts,
       },
     });
+  });
+
+  app.get('/courses', async (req, res) => {
+    const session = await getAppSession(req);
+    try {
+      const courses = await withDbRetry(() => store.listMarketplaceCourses({ limit: 50 }));
+      const options: CourseMarketplacePageOptions = { courses };
+      if (session) {
+        options.session = session;
+      }
+      res.send(renderCourseMarketplacePage(options));
+    } catch (error) {
+      logger.error('Error loading course marketplace', error);
+      res.status(500).send(renderPlainWebPage({
+        title: 'Каталог курсов',
+        heading: 'Не удалось загрузить каталог',
+        body: '<p class="lead">Попробуйте обновить страницу позже.</p>',
+      }));
+    }
+  });
+
+  app.get('/my/courses', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    try {
+      const courses = await withDbRetry(() => store.listCourseSummariesByAppUser(session.user.id));
+      res.send(renderMyCoursesPage({ user: session.user, courses }));
+    } catch (error) {
+      logger.error('Error loading user courses', error);
+      res.status(500).send(renderPlainWebPage({
+        title: 'Мои курсы',
+        heading: 'Не удалось загрузить ваши курсы',
+        body: '<p class="lead">Попробуйте обновить страницу позже.</p>',
+      }));
+    }
+  });
+
+  app.get('/courses/new', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    res.send(renderCourseCreatePage({ user: session.user }));
+  });
+
+  app.post('/courses', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    const telegramUserId = session.user.primaryTelegramUserId;
+    const draft = courseFormDraftFromBody(req.body);
+    if (!telegramUserId) {
+      res.status(409).send(renderCourseCreatePage({
+        user: session.user,
+        draft,
+        error: 'Чтобы создавать курсы и получать шаги в очереди, сначала подключите Telegram в личном кабинете.',
+      }));
+      return;
+    }
+
+    const parsed = parseCourseFormPayload(req.body);
+    if (!parsed.data) {
+      res.status(400).send(renderCourseCreatePage({
+        user: session.user,
+        draft,
+        error: parsed.error ?? 'Не удалось разобрать курс.',
+      }));
+      return;
+    }
+    const payload = parsed.data;
+
+    try {
+      const result = await withDbRetry(() =>
+        store.createCourseWithSteps({
+          ownerUserId: telegramUserId,
+          ownerAppUserId: session.user.id,
+          title: payload.title,
+          description: payload.description,
+          status: 'active',
+          visibility: payload.visibility,
+          steps: payload.steps,
+        }),
+      );
+      const course = result.course;
+      if (course.visibility === 'public' && course.publicSlug) {
+        res.redirect(`/courses/${encodeURIComponent(course.publicSlug)}`);
+        return;
+      }
+      res.redirect('/my/courses');
+    } catch (error) {
+      logger.error('Error creating web course', error);
+      res.status(500).send(renderCourseCreatePage({
+        user: session.user,
+        draft,
+        error: 'Не удалось создать курс. Проверьте данные и попробуйте ещё раз.',
+      }));
+    }
+  });
+
+  app.get('/courses/:slug', async (req, res) => {
+    const slug = req.params.slug;
+    if (!slug) {
+      res.status(404).send(renderCourseNotFoundPage());
+      return;
+    }
+    const session = await getAppSession(req);
+    try {
+      const course = await withDbRetry(() => store.getPublicCourseDetailsBySlug(slug));
+      if (!course) {
+        res.status(404).send(renderCourseNotFoundPage());
+        return;
+      }
+      const options: CourseDetailsPageOptions = {
+        course,
+        publicBaseUrl,
+        started: req.query.started === '1',
+      };
+      if (session) {
+        options.session = session;
+      }
+      res.send(renderCourseDetailsPage(options));
+    } catch (error) {
+      logger.error('Error loading public course', error);
+      res.status(500).send(renderPlainWebPage({
+        title: 'Курс',
+        heading: 'Не удалось загрузить курс',
+        body: '<p class="lead">Попробуйте обновить страницу позже.</p>',
+      }));
+    }
+  });
+
+  app.post('/courses/:slug/start', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    const slug = req.params.slug;
+    const telegramUserId = session.user.primaryTelegramUserId;
+    if (!slug) {
+      res.status(404).send(renderCourseNotFoundPage());
+      return;
+    }
+    if (!telegramUserId) {
+      res.redirect('/account?error=telegram_required');
+      return;
+    }
+    try {
+      const course = await withDbRetry(() => store.getPublicCourseDetailsBySlug(slug));
+      if (!course) {
+        res.status(404).send(renderCourseNotFoundPage());
+        return;
+      }
+      if (course.steps.length === 0) {
+        res.status(409).send(renderPlainWebPage({
+          title: course.title,
+          heading: 'В курсе пока нет шагов',
+          body: `<p class="lead"><a href="/courses/${encodeURIComponent(slug)}">Вернуться к курсу</a></p>`,
+        }));
+        return;
+      }
+      await withDbRetry(() =>
+        store.startCourseEnrollment({
+          courseId: course.id,
+          userId: telegramUserId,
+          queueScope: buildUserQueueScope(telegramUserId),
+          cadence: 'after_view',
+        }),
+      );
+      res.redirect(`/courses/${encodeURIComponent(slug)}?started=1`);
+    } catch (error) {
+      logger.error('Error starting public course', error);
+      res.status(500).send(renderPlainWebPage({
+        title: 'Старт курса',
+        heading: 'Не удалось запустить курс',
+        body: '<p class="lead">Попробуйте ещё раз позже.</p>',
+      }));
+    }
   });
 
   // Mini App authentication middleware
@@ -1670,6 +1898,36 @@ type AccountPageOptions = {
   error?: string;
 };
 
+type CourseFormDraft = {
+  title: string;
+  description: string;
+  visibility: CourseVisibility;
+  stepsText: string;
+};
+
+type CourseMarketplacePageOptions = {
+  courses: CourseMarketplaceRecord[];
+  session?: AppSessionRecord;
+};
+
+type MyCoursesPageOptions = {
+  user: AppUserRecord;
+  courses: CourseMarketplaceRecord[];
+};
+
+type CourseCreatePageOptions = {
+  user: AppUserRecord;
+  draft?: CourseFormDraft;
+  error?: string;
+};
+
+type CourseDetailsPageOptions = {
+  course: CourseDetailsRecord;
+  publicBaseUrl: string;
+  started: boolean;
+  session?: AppSessionRecord;
+};
+
 const renderAccountPage = (options: AccountPageOptions) => {
   const googleConnected = options.accounts.some((account) => account.provider === 'google');
   const telegramConnected = options.accounts.some((account) => account.provider === 'telegram');
@@ -1737,6 +1995,9 @@ const renderAccountPage = (options: AccountPageOptions) => {
       <section class="panel">
         <h2>Ссылки</h2>
         <div class="link-grid">
+          <a class="button secondary" href="/courses">Маркетплейс курсов</a>
+          <a class="button secondary" href="/courses/new">Создать курс</a>
+          <a class="button secondary" href="/my/courses">Мои курсы</a>
           <a class="button secondary" href="/miniapp">Открыть Mini App</a>
           <a class="button secondary" href="/auth/signin">Страница входа</a>
           <a class="button secondary" href="/login">Админская панель</a>
@@ -1745,6 +2006,287 @@ const renderAccountPage = (options: AccountPageOptions) => {
     </main>
   </body>
 </html>`;
+};
+
+const courseFormDraftFromBody = (body: unknown): CourseFormDraft => {
+  const input = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  return {
+    title: typeof input.title === 'string' ? input.title : '',
+    description: typeof input.description === 'string' ? input.description : '',
+    visibility: input.visibility === 'public' ? 'public' : 'private',
+    stepsText: typeof input.stepsText === 'string' ? input.stepsText : '',
+  };
+};
+
+const emptyCourseDraft = (): CourseFormDraft => ({
+  title: '',
+  description: '',
+  visibility: 'public',
+  stepsText: '',
+});
+
+const renderCourseMarketplacePage = (options: CourseMarketplacePageOptions) => {
+  const createLink = options.session ? '/courses/new' : '/auth/signin?next=/courses/new';
+  const accountLink = options.session ? '/account' : '/auth/signin?next=/courses';
+  const coursesHtml = options.courses.length
+    ? options.courses.map(renderCourseListCard).join('')
+    : `<section class="panel empty-panel">
+        <h2>Пока нет публичных курсов</h2>
+        <p class="lead">Первый курс можно создать из личного кабинета и опубликовать в каталоге.</p>
+      </section>`;
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Маркетплейс курсов</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="account-shell wide-shell">
+      <nav class="top-nav">
+        <a href="/account">Аккаунт</a>
+        <a href="/my/courses">Мои курсы</a>
+        <a href="${accountLink}">${options.session ? 'Профиль' : 'Войти'}</a>
+      </nav>
+      <section class="panel hero-panel">
+        <div>
+          <p class="eyebrow">Курсы</p>
+          <h1>Маркетплейс коротких курсов</h1>
+          <p class="lead">Публичные курсы можно открыть, запустить себе и проходить шаг за шагом в обычной очереди напоминаний.</p>
+        </div>
+        <a class="button" href="${createLink}">Создать курс</a>
+      </section>
+      <div class="course-grid">${coursesHtml}</div>
+    </main>
+  </body>
+</html>`;
+};
+
+const renderMyCoursesPage = (options: MyCoursesPageOptions) => {
+  const coursesHtml = options.courses.length
+    ? options.courses.map(renderCourseListCard).join('')
+    : `<section class="panel empty-panel">
+        <h2>У вас пока нет курсов</h2>
+        <p class="lead">Создайте первый курс из нескольких коротких шагов.</p>
+      </section>`;
+  const displayName = options.user.displayName || options.user.email || 'Пользователь';
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Мои курсы</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="account-shell wide-shell">
+      <nav class="top-nav">
+        <a href="/courses">Маркетплейс</a>
+        <a href="/account">Аккаунт</a>
+      </nav>
+      <section class="panel hero-panel">
+        <div>
+          <p class="eyebrow">Мои курсы</p>
+          <h1>${escapeHtml(displayName)}</h1>
+          <p class="lead">Здесь видны курсы, созданные через веб-кабинет.</p>
+        </div>
+        <a class="button" href="/courses/new">Создать курс</a>
+      </section>
+      <div class="course-grid">${coursesHtml}</div>
+    </main>
+  </body>
+</html>`;
+};
+
+const renderCourseCreatePage = (options: CourseCreatePageOptions) => {
+  const draft = options.draft ?? emptyCourseDraft();
+  const telegramConnected = Boolean(options.user.primaryTelegramUserId);
+  const errorMessage = options.error
+    ? `<p class="error">${escapeHtml(options.error)}</p>`
+    : '';
+  const telegramNotice = telegramConnected
+    ? ''
+    : `<section class="panel notice-panel">
+        <h2>Сначала подключите Telegram</h2>
+        <p class="lead">Курс можно создать после привязки Telegram, потому что шаги курса доставляются в ту же очередь напоминаний.</p>
+        <a class="button secondary" href="/account">Открыть личный кабинет</a>
+      </section>`;
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Создать курс</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="account-shell wide-shell">
+      <nav class="top-nav">
+        <a href="/courses">Маркетплейс</a>
+        <a href="/my/courses">Мои курсы</a>
+        <a href="/account">Аккаунт</a>
+      </nav>
+      <section class="panel">
+        <p class="eyebrow">Новый курс</p>
+        <h1>Создать короткий курс</h1>
+        <p class="lead">Каждый блок шагов отделяется пустой строкой. Первая строка блока — заголовок, остальные строки — текст шага.</p>
+        ${errorMessage}
+        <form class="course-form" method="post" action="/courses">
+          <label>
+            Название
+            <input name="title" value="${escapeHtml(draft.title)}" placeholder="Например: Основы SQL за 10 шагов" ${telegramConnected ? '' : 'disabled'} />
+          </label>
+          <label>
+            Описание
+            <textarea name="description" rows="3" placeholder="Коротко о результате курса" ${telegramConnected ? '' : 'disabled'}>${escapeHtml(draft.description)}</textarea>
+          </label>
+          <fieldset>
+            <legend>Видимость</legend>
+            <label class="radio-row">
+              <input type="radio" name="visibility" value="public" ${draft.visibility === 'public' ? 'checked' : ''} ${telegramConnected ? '' : 'disabled'} />
+              Опубликовать в маркетплейсе
+            </label>
+            <label class="radio-row">
+              <input type="radio" name="visibility" value="private" ${draft.visibility === 'private' ? 'checked' : ''} ${telegramConnected ? '' : 'disabled'} />
+              Оставить приватным
+            </label>
+          </fieldset>
+          <label>
+            Шаги
+            <textarea name="stepsText" rows="14" placeholder="Шаг 1: Введение&#10;Короткий текст первого шага.&#10;&#10;Шаг 2: Практика&#10;Что нужно сделать." ${telegramConnected ? '' : 'disabled'}>${escapeHtml(draft.stepsText)}</textarea>
+          </label>
+          <button type="submit" ${telegramConnected ? '' : 'disabled'}>Создать курс</button>
+        </form>
+      </section>
+      ${telegramNotice}
+    </main>
+  </body>
+</html>`;
+};
+
+const renderCourseDetailsPage = (options: CourseDetailsPageOptions) => {
+  const course = options.course;
+  const creator = course.creatorName || 'Автор курса';
+  const shareUrl = `${options.publicBaseUrl}/courses/${encodeURIComponent(course.publicSlug ?? '')}`;
+  const startAction = course.publicSlug ? `/courses/${encodeURIComponent(course.publicSlug)}/start` : '#';
+  const startBlock = options.session
+    ? options.session.user.primaryTelegramUserId
+      ? `<form method="post" action="${startAction}">
+          <button type="submit">Начать курс</button>
+        </form>`
+      : `<a class="button" href="/account?error=telegram_required">Подключить Telegram</a>`
+    : `<a class="button" href="/auth/signin?next=/courses/${encodeURIComponent(course.publicSlug ?? '')}">Войти и начать</a>`;
+  const startedMessage = options.started
+    ? '<p class="success">Курс запущен. Первый шаг уже добавлен в вашу очередь напоминаний.</p>'
+    : '';
+  const stepsHtml = course.steps
+    .map((step) => `
+      <li>
+        <span>${step.position}</span>
+        <div>
+          <strong>${escapeHtml(step.title)}</strong>
+          <p>${escapeHtml(step.body).replace(/\n/g, '<br />')}</p>
+        </div>
+      </li>
+    `)
+    .join('');
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(course.title)}</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="account-shell wide-shell">
+      <nav class="top-nav">
+        <a href="/courses">Маркетплейс</a>
+        <a href="/my/courses">Мои курсы</a>
+        <a href="/account">Аккаунт</a>
+      </nav>
+      <section class="panel hero-panel">
+        <div>
+          <p class="eyebrow">Публичный курс</p>
+          <h1>${escapeHtml(course.title)}</h1>
+          <p class="lead">${escapeHtml(course.description || 'Короткий курс для прохождения в очереди напоминаний.')}</p>
+          <p class="meta-line">${escapeHtml(creator)} · ${course.stepCount} ${stepWord(course.stepCount)} · ${course.activeEnrollmentCount + course.completedEnrollmentCount} запусков</p>
+          ${startedMessage}
+        </div>
+        <div class="course-actions">
+          ${startBlock}
+          <input class="share-input" readonly value="${escapeHtml(shareUrl)}" />
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Шаги курса</h2>
+        <ol class="step-list">${stepsHtml}</ol>
+      </section>
+    </main>
+  </body>
+</html>`;
+};
+
+const renderCourseNotFoundPage = () => renderPlainWebPage({
+  title: 'Курс не найден',
+  heading: 'Курс не найден',
+  body: '<p class="lead"><a href="/courses">Открыть маркетплейс курсов</a></p>',
+});
+
+const renderPlainWebPage = ({
+  title,
+  heading,
+  body,
+}: {
+  title: string;
+  heading: string;
+  body: string;
+}) => `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    ${renderAccountStyles()}
+  </head>
+  <body>
+    <main class="account-shell">
+      <section class="panel">
+        <h1>${escapeHtml(heading)}</h1>
+        ${body}
+      </section>
+    </main>
+  </body>
+</html>`;
+
+const renderCourseListCard = (course: CourseMarketplaceRecord) => {
+  const href = course.publicSlug ? `/courses/${encodeURIComponent(course.publicSlug)}` : '/my/courses';
+  const visibilityLabel = course.visibility === 'public' ? 'Публичный' : 'Приватный';
+  return `<article class="course-card">
+    <div>
+      <p class="eyebrow">${escapeHtml(visibilityLabel)}</p>
+      <h2><a href="${href}">${escapeHtml(course.title)}</a></h2>
+      <p>${escapeHtml(course.description || 'Короткий курс для очереди напоминаний.')}</p>
+    </div>
+    <div class="course-card-footer">
+      <span>${course.stepCount} ${stepWord(course.stepCount)}</span>
+      <span>${course.activeEnrollmentCount + course.completedEnrollmentCount} запусков</span>
+      <span>${escapeHtml(course.creatorName || 'Автор')}</span>
+    </div>
+  </article>`;
+};
+
+const stepWord = (count: number) => {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'шаг';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'шага';
+  return 'шагов';
 };
 
 const renderTelegramLoginWidget = ({
@@ -1787,30 +2329,39 @@ const authErrorLabel = (code: string) => {
     google_auth_failed: 'Не удалось войти через Google.',
     telegram_auth_failed: 'Не удалось войти через Telegram.',
     account_already_linked: 'Этот внешний аккаунт уже привязан к другому пользователю.',
+    telegram_required: 'Подключите Telegram, чтобы создавать и запускать курсы.',
   };
   return labels[code] ?? 'Не удалось выполнить вход.';
 };
 
 const renderAccountStyles = () => `
 <style>
-  :root { color-scheme: light; --bg: #f5f5f0; --panel: #ffffff; --text: #1f2933; --muted: #6b7280; --border: #d9d9d2; --accent: #111827; --accentText: #ffffff; --danger: #b42318; --ok: #047857; }
+  :root { color-scheme: light; --bg: #f5f5f0; --panel: #ffffff; --text: #1f2933; --muted: #6b7280; --border: #d9d9d2; --accent: #111827; --accentText: #ffffff; --danger: #b42318; --ok: #047857; --soft: #f8faf7; }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
   .auth-card { width: min(100% - 32px, 440px); margin: 12vh auto 0; padding: 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--panel); box-shadow: 0 18px 50px rgba(17,24,39,.08); }
   .account-shell { width: min(100% - 32px, 760px); margin: 32px auto; display: grid; gap: 14px; }
+  .wide-shell { width: min(100% - 32px, 980px); }
   .panel { border: 1px solid var(--border); border-radius: 18px; background: var(--panel); padding: 22px; }
   .profile-panel { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .hero-panel { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+  .notice-panel { background: var(--soft); }
+  .empty-panel { grid-column: 1 / -1; }
+  .top-nav { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; font-size: 14px; }
+  .top-nav a, a { color: var(--accent); }
   .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; font-weight: 700; }
   h1 { margin: 0; font-size: 30px; line-height: 1.1; }
   h2 { margin: 0 0 14px; font-size: 18px; }
   h3 { margin: 0 0 4px; font-size: 15px; }
   .lead, .provider-row p, .muted { color: var(--muted); font-size: 14px; line-height: 1.45; }
   .lead { margin: 10px 0 0; }
+  .meta-line { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
   .actions { display: grid; gap: 14px; margin-top: 22px; }
   .telegram-box { min-height: 44px; display: flex; align-items: center; }
   .button, button { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--accentText); padding: 0 16px; font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer; }
   .button.small { min-height: 36px; font-size: 13px; }
   .button.secondary, .ghost-button { border-color: var(--border); background: transparent; color: var(--text); }
+  button:disabled, input:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; }
   .secondary-link { display: inline-flex; margin-top: 18px; color: var(--muted); font-size: 13px; }
   .provider-list { display: grid; gap: 10px; }
   .provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 64px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; }
@@ -1819,8 +2370,32 @@ const renderAccountStyles = () => `
   .status { display: inline-flex; min-height: 30px; align-items: center; border-radius: 999px; padding: 0 10px; font-size: 12px; font-weight: 700; }
   .connected { color: var(--ok); background: #ecfdf3; }
   .error { color: var(--danger); margin: 14px 0 0; font-size: 14px; }
+  .success { color: var(--ok); margin: 14px 0 0; font-size: 14px; font-weight: 700; }
   .link-grid { display: flex; flex-wrap: wrap; gap: 10px; }
-  @media (max-width: 540px) { .profile-panel, .provider-row { grid-template-columns: 1fr; display: grid; } .provider-action { justify-content: flex-start; } }
+  .course-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .course-card { min-height: 190px; display: flex; flex-direction: column; justify-content: space-between; gap: 18px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); padding: 18px; }
+  .course-card h2 { margin-bottom: 10px; line-height: 1.2; }
+  .course-card h2 a { color: var(--text); text-decoration: none; }
+  .course-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+  .course-card-footer { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
+  .course-card-footer span { border: 1px solid var(--border); border-radius: 999px; padding: 5px 8px; background: var(--soft); }
+  .course-form { display: grid; gap: 16px; margin-top: 20px; }
+  .course-form label { display: grid; gap: 7px; font-size: 14px; font-weight: 700; }
+  input, textarea { width: 100%; border: 1px solid var(--border); border-radius: 12px; background: #fff; color: var(--text); padding: 11px 12px; font: inherit; font-size: 14px; line-height: 1.45; }
+  textarea { resize: vertical; }
+  fieldset { border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin: 0; }
+  legend { padding: 0 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+  .radio-row { display: flex !important; grid-template-columns: none; align-items: center; gap: 8px; font-weight: 500 !important; color: var(--text); }
+  .radio-row input { width: auto; }
+  .course-actions { min-width: min(100%, 280px); display: grid; gap: 10px; justify-items: stretch; }
+  .share-input { font-size: 12px; color: var(--muted); }
+  .step-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  .step-list li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: start; padding: 14px 0; border-top: 1px solid var(--border); }
+  .step-list li:first-child { border-top: 0; }
+  .step-list span { width: 34px; height: 34px; border-radius: 50%; background: var(--soft); border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; font-weight: 700; }
+  .step-list strong { display: block; margin-bottom: 6px; }
+  .step-list p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+  @media (max-width: 640px) { .hero-panel, .profile-panel, .provider-row { grid-template-columns: 1fr; display: grid; } .provider-action { justify-content: flex-start; } .course-actions { width: 100%; } }
 </style>`;
 
 const escapeHtml = (value: string): string => {
