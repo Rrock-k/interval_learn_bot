@@ -8,7 +8,7 @@
 - Сохранение исходного сообщения и пересылка его в канал по расписанию (через webhook не требуется — используется long polling).
 - Кнопки с оценкой интервала прямо под постом в канале; результат влияет на следующую дату повторения.
 - Встроенный веб-интерфейс (http://localhost:3000) для просмотра карточек, ускорения повторов, отложенных напоминаний и удаления записей (доступ после ввода `DASHBOARD_SECRET`).
-- Личный кабинет с каталогом курсов: пользователи могут войти через Telegram/Google, создать короткий курс, опубликовать его в маркетплейсе и запустить публичный курс себе в очередь напоминаний.
+- Личный кабинет с каталогом курсов: пользователи могут войти через Telegram/Google, создать короткий курс вручную или через LLM-чат, опубликовать его в маркетплейсе и запустить публичный курс себе в очередь напоминаний.
 - Консольное логирование, `.env` для локальной разработки и GitHub Secrets/переменные Railway для продакшена.
 
 ## Требования
@@ -35,6 +35,9 @@
   - `WEB_SESSION_SECRET` — отдельный секрет web-сессий личного кабинета; если не задан, используется `DASHBOARD_SECRET`.
   - `TELEGRAM_LOGIN_BOT_USERNAME` — username бота без `@` для входа через Telegram Login Widget.
   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — OAuth-клиент Google для входа через Google.
+  - `COURSE_AUTHORING_LLM_API_KEY` или `OPENAI_API_KEY` — ключ OpenAI-compatible провайдера для LLM-создания курсов; без ключа включается локальный fallback-черновик.
+  - `COURSE_AUTHORING_LLM_BASE_URL` — base URL OpenAI-compatible API (по умолчанию `https://api.openai.com/v1`).
+  - `COURSE_AUTHORING_LLM_MODEL` — модель для LLM-создания курсов.
 
 Создайте локальный `.env` на основе шаблона:
 
@@ -58,7 +61,7 @@ npm start
 
 Откройте `http://localhost:3000` — отобразится страница входа. Введите значение `DASHBOARD_SECRET`, после чего появится дашборд с фильтрами, бэклогом агента, отложенными повторами и удалением карточек.
 
-Личный кабинет доступен по `/account`, вход — `/auth/signin`. Маркетплейс курсов доступен по `/courses`, создание курса — `/courses/new`, список собственных курсов — `/my/courses`. Telegram login требует, чтобы публичный домен был указан у BotFather для Telegram Login Widget. Для Google OAuth callback укажите `${PUBLIC_URL}/auth/google/callback`.
+Личный кабинет доступен по `/account`, вход — `/auth/signin`. Маркетплейс курсов доступен по `/courses`, создание курса через LLM-чат на базе ChatScope Chat UI Kit — `/courses/author`, ручное создание — `/courses/new`, список собственных курсов — `/my/courses`. Telegram login требует, чтобы публичный домен был указан у BotFather для Telegram Login Widget. Для Google OAuth callback укажите `${PUBLIC_URL}/auth/google/callback`.
 
 ## Архитектура
 - `src/bot.ts` — обработчики Telegram: intake сообщений, подтверждение добавления, обработка оценок.
@@ -66,6 +69,7 @@ npm start
 - `src/reviewScheduler.ts` — периодическая проверка `next_review_at` и публикация карточек в канал.
 - `src/spacedRepetition.ts` — SM-2 с поддержкой 4 оценок.
 - `src/httpServer.ts` — Express-сервер с REST API и раздачей `public/dashboard.html`.
+- `src/courseAuthoring.ts` — независимый authoring-контракт для генерации черновиков курсов через LLM, MCP/API или fallback-провайдер.
 - `src/index.ts` — точка входа, связывает бота, БД и планировщик.
 
 ## Railway деплой

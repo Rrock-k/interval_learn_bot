@@ -3,6 +3,9 @@ pre-commit:
     miniapp-build:
       glob: "miniapp-src/**/*"
       run: npm run miniapp:build && git add public/miniapp
+    authoring-build:
+      glob: "authoring-src/**/*"
+      run: npm run authoring:build && git add public/course-authoring
 
 pre-push:
   parallel: true

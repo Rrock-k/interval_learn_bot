@@ -1,0 +1,296 @@
+:root {
+  color-scheme: light;
+  --bg: #f4f3ee;
+  --panel: #fffefa;
+  --text: #1f2933;
+  --muted: #65717f;
+  --border: #d9d7cc;
+  --accent: #111827;
+  --soft: #f8f7f0;
+  --danger: #b42318;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.authoring-shell {
+  width: min(100% - 32px, 1180px);
+  margin: 24px auto;
+  display: grid;
+  gap: 16px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 18px;
+}
+
+.topbar p,
+.draft-heading p {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.topbar h1,
+.draft-heading h2 {
+  margin: 0;
+  line-height: 1.08;
+}
+
+.topbar h1 {
+  font-size: 32px;
+}
+
+.topbar nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.topbar a {
+  color: var(--accent);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(360px, 460px);
+  gap: 16px;
+  align-items: stretch;
+  min-height: calc(100vh - 132px);
+}
+
+.chat-pane,
+.draft-pane {
+  min-height: 620px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.chat-pane {
+  position: relative;
+}
+
+.chat-pane .cs-main-container {
+  height: 100%;
+  border: 0;
+  background: var(--panel);
+}
+
+.chat-pane .cs-message-list {
+  background: var(--panel);
+}
+
+.chat-pane .cs-message-input {
+  border-top-color: var(--border);
+}
+
+.draft-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+}
+
+.draft-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.draft-heading h2 {
+  font-size: 22px;
+}
+
+.draft-heading span {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--soft);
+}
+
+.field {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input,
+.field textarea,
+.step-editor input,
+.step-editor textarea,
+.step-topline select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 10px 11px;
+  line-height: 1.45;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.visibility {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.visibility button,
+.steps-header button,
+.step-topline button,
+.create-button {
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.visibility button.selected {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.steps-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.steps-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.steps-header button,
+.step-topline button {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.steps-list {
+  display: grid;
+  gap: 12px;
+}
+
+.empty-state {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--soft);
+}
+
+.step-editor {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+}
+
+.step-topline {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.step-topline span {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  background: var(--soft);
+}
+
+.error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.create-button {
+  min-height: 46px;
+  margin-top: auto;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.create-button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 860px) {
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .topbar nav {
+    justify-content: flex-start;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-pane,
+  .draft-pane {
+    min-height: 540px;
+  }
+}

@@ -29,6 +29,12 @@ import {
   UserReminderSettings,
 } from './db';
 import { CourseStepKind } from './courses';
+import {
+  CourseAuthoringMessage,
+  LocalCourseDraftGenerator,
+  createCourseDraftGenerator,
+  normalizeCourseDraft,
+} from './courseAuthoring';
 import { config } from './config';
 import { logger } from './logger';
 import { getPublicBaseUrl } from './publicUrl';
@@ -44,6 +50,7 @@ import {
 } from './webAuth';
 
 const publicDir = path.join(process.cwd(), 'public');
+const courseAuthoringPublicDir = path.join(publicDir, 'course-authoring');
 const DASHBOARD_SESSION_COOKIE = 'dashboard_session';
 const APP_SESSION_COOKIE = 'app_session';
 const OAUTH_STATE_COOKIE = 'oauth_state';
@@ -231,6 +238,23 @@ const parseCourseFormPayload = (body: unknown): { data?: CourseFormPayload; erro
   };
 };
 
+const parseCourseAuthoringMessages = (value: unknown): CourseAuthoringMessage[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      const message = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
+      const role: CourseAuthoringMessage['role'] = message.role === 'assistant' ? 'assistant' : 'user';
+      const content = typeof message.content === 'string' ? message.content.trim() : '';
+      return { role, content };
+    })
+    .filter((message) => message.content)
+    .slice(-20)
+    .map((message) => ({
+      role: message.role,
+      content: message.content.slice(0, 4000),
+    }));
+};
+
 const parseQueueDelayMinutes = (value: unknown, fallback: number) => {
   const raw = typeof value === 'string' ? Number(value) : value;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return fallback;
@@ -285,6 +309,12 @@ export const createHttpServer = (
     ? hashSecret(config.agentApiToken)
     : null;
   const publicBaseUrl = getPublicBaseUrl();
+  const courseDraftGenerator = createCourseDraftGenerator({
+    apiKey: config.courseAuthoringLlmApiKey,
+    baseUrl: config.courseAuthoringLlmBaseUrl,
+    model: config.courseAuthoringLlmModel,
+  });
+  const courseDraftGeneratorFallback = new LocalCourseDraftGenerator();
 
   const getSessionToken = (req: Request): string | undefined => {
     const token = req.cookies?.[DASHBOARD_SESSION_COOKIE];
@@ -342,6 +372,10 @@ export const createHttpServer = (
   const requireAppAuth = async (req: Request, res: Response, next: NextFunction) => {
     const session = await getAppSession(req);
     if (!session) {
+      if (req.originalUrl.startsWith('/api/')) {
+        res.status(401).json({ error: 'Необходима авторизация' });
+        return;
+      }
       const nextPath = encodeURIComponent(req.originalUrl ?? '/account');
       res.redirect(`/auth/signin?next=${nextPath}`);
       return;
@@ -651,6 +685,53 @@ export const createHttpServer = (
   app.get('/courses/new', requireAppAuth, async (req, res) => {
     const session = (req as any).appSession as AppSessionRecord;
     res.send(renderCourseCreatePage({ user: session.user }));
+  });
+
+  app.get('/courses/author', requireAppAuth, (_req, res) => {
+    res.sendFile(path.join(courseAuthoringPublicDir, 'index.html'));
+  });
+
+  app.post('/api/course-authoring/generate', requireAppAuth, async (req, res) => {
+    const messages = parseCourseAuthoringMessages(req.body?.messages);
+    if (!messages.length) {
+      res.status(400).json({ error: 'Добавьте сообщение о том, какой курс нужен.' });
+      return;
+    }
+    try {
+      const result = await courseDraftGenerator.generateDraft({ messages });
+      res.json({ data: result });
+    } catch (error) {
+      logger.error('Error generating course draft', error);
+      const fallback = await courseDraftGeneratorFallback.generateDraft({ messages });
+      res.json({ data: fallback });
+    }
+  });
+
+  app.post('/api/course-authoring/courses', requireAppAuth, async (req, res) => {
+    const session = (req as any).appSession as AppSessionRecord;
+    const draft = normalizeCourseDraft(req.body?.draft);
+    if (!draft) {
+      res.status(400).json({ error: 'Некорректный черновик курса.' });
+      return;
+    }
+    const visibility: CourseVisibility = req.body?.visibility === 'private' ? 'private' : 'public';
+    try {
+      const result = await withDbRetry(() =>
+        store.createCourseWithSteps({
+          ownerUserId: session.user.primaryTelegramUserId ?? null,
+          ownerAppUserId: session.user.id,
+          title: draft.title,
+          description: draft.description,
+          status: 'active',
+          visibility,
+          steps: draft.steps,
+        }),
+      );
+      res.json({ data: result });
+    } catch (error) {
+      logger.error('Error creating course from authoring draft', error);
+      res.status(500).json({ error: 'Не удалось создать курс.' });
+    }
   });
 
   app.post('/courses', requireAppAuth, async (req, res) => {
@@ -1987,6 +2068,7 @@ const renderAccountPage = (options: AccountPageOptions) => {
         <h2>Ссылки</h2>
         <div class="link-grid">
           <a class="button secondary" href="/courses">Маркетплейс курсов</a>
+          <a class="button secondary" href="/courses/author">Создать курс с LLM</a>
           <a class="button secondary" href="/courses/new">Создать курс</a>
           <a class="button secondary" href="/my/courses">Мои курсы</a>
           <a class="button secondary" href="/miniapp">Открыть Mini App</a>
@@ -2017,7 +2099,7 @@ const emptyCourseDraft = (): CourseFormDraft => ({
 });
 
 const renderCourseMarketplacePage = (options: CourseMarketplacePageOptions) => {
-  const createLink = options.session ? '/courses/new' : '/auth/signin?next=/courses/new';
+  const createLink = options.session ? '/courses/author' : '/auth/signin?next=/courses/author';
   const accountLink = options.session ? '/account' : '/auth/signin?next=/courses';
   const coursesHtml = options.courses.length
     ? options.courses.map(renderCourseListCard).join('')
@@ -2047,7 +2129,10 @@ const renderCourseMarketplacePage = (options: CourseMarketplacePageOptions) => {
           <h1>Маркетплейс коротких курсов</h1>
           <p class="lead">Публичные курсы можно открыть, запустить себе и проходить шаг за шагом в обычной очереди напоминаний.</p>
         </div>
-        <a class="button" href="${createLink}">Создать курс</a>
+        <div class="button-row">
+          <a class="button" href="${createLink}">Создать с LLM</a>
+          <a class="button secondary" href="${options.session ? '/courses/new' : '/auth/signin?next=/courses/new'}">Создать вручную</a>
+        </div>
       </section>
       <div class="course-grid">${coursesHtml}</div>
     </main>
@@ -2084,7 +2169,10 @@ const renderMyCoursesPage = (options: MyCoursesPageOptions) => {
           <h1>${escapeHtml(displayName)}</h1>
           <p class="lead">Здесь видны курсы, созданные через веб-кабинет.</p>
         </div>
-        <a class="button" href="/courses/new">Создать курс</a>
+        <div class="button-row">
+          <a class="button" href="/courses/author">Создать с LLM</a>
+          <a class="button secondary" href="/courses/new">Создать вручную</a>
+        </div>
       </section>
       <div class="course-grid">${coursesHtml}</div>
     </main>
@@ -2352,6 +2440,7 @@ const renderAccountStyles = () => `
   .button, button { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; border-radius: 12px; border: 1px solid var(--accent); background: var(--accent); color: var(--accentText); padding: 0 16px; font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer; }
   .button.small { min-height: 36px; font-size: 13px; }
   .button.secondary, .ghost-button { border-color: var(--border); background: transparent; color: var(--text); }
+  .button-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end; }
   button:disabled, input:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; }
   .secondary-link { display: inline-flex; margin-top: 18px; color: var(--muted); font-size: 13px; }
   .provider-list { display: grid; gap: 10px; }

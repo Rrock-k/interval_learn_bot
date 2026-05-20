@@ -30,6 +30,9 @@ export const config = {
   telegramLoginBotUsername: process.env.TELEGRAM_LOGIN_BOT_USERNAME?.replace(/^@/, '').trim() || null,
   googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || null,
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || null,
+  courseAuthoringLlmApiKey: process.env.COURSE_AUTHORING_LLM_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || null,
+  courseAuthoringLlmBaseUrl: process.env.COURSE_AUTHORING_LLM_BASE_URL?.trim() || 'https://api.openai.com/v1',
+  courseAuthoringLlmModel: process.env.COURSE_AUTHORING_LLM_MODEL?.trim() || null,
   backlogOwnerUserId: (process.env.BACKLOG_OWNER_USER_ID || '359367655').trim(),
   agentApiToken: process.env.AGENT_API_TOKEN?.trim() || null,
   scheduler: {
