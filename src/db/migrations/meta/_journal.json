@@ -92,6 +92,13 @@
       "when": 1779307500000,
       "tag": "0012_add_course_marketplace",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1779307600000,
+      "tag": "0013_allow_web_only_course_authors",
+      "breakpoints": true
     }
   ]
 }

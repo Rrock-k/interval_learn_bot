@@ -180,7 +180,7 @@ export const courses = pgTable(
   'courses',
   {
     id: text('id').primaryKey(),
-    ownerUserId: text('owner_user_id').notNull(),
+    ownerUserId: text('owner_user_id'),
     ownerAppUserId: text('owner_app_user_id').references(() => appUsers.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     description: text('description'),

@@ -657,15 +657,6 @@ export const createHttpServer = (
     const session = (req as any).appSession as AppSessionRecord;
     const telegramUserId = session.user.primaryTelegramUserId;
     const draft = courseFormDraftFromBody(req.body);
-    if (!telegramUserId) {
-      res.status(409).send(renderCourseCreatePage({
-        user: session.user,
-        draft,
-        error: 'Чтобы создавать курсы и получать шаги в очереди, сначала подключите Telegram в личном кабинете.',
-      }));
-      return;
-    }
-
     const parsed = parseCourseFormPayload(req.body);
     if (!parsed.data) {
       res.status(400).send(renderCourseCreatePage({
@@ -680,7 +671,7 @@ export const createHttpServer = (
     try {
       const result = await withDbRetry(() =>
         store.createCourseWithSteps({
-          ownerUserId: telegramUserId,
+          ownerUserId: telegramUserId ?? null,
           ownerAppUserId: session.user.id,
           title: payload.title,
           description: payload.description,
@@ -2110,8 +2101,8 @@ const renderCourseCreatePage = (options: CourseCreatePageOptions) => {
   const telegramNotice = telegramConnected
     ? ''
     : `<section class="panel notice-panel">
-        <h2>Сначала подключите Telegram</h2>
-        <p class="lead">Курс можно создать после привязки Telegram, потому что шаги курса доставляются в ту же очередь напоминаний.</p>
+        <h2>Telegram нужен только для запуска</h2>
+        <p class="lead">Курс можно создать и опубликовать сейчас. Чтобы проходить курс самому и получать шаги в очереди напоминаний, подключите Telegram.</p>
         <a class="button secondary" href="/account">Открыть личный кабинет</a>
       </section>`;
 
@@ -2138,28 +2129,28 @@ const renderCourseCreatePage = (options: CourseCreatePageOptions) => {
         <form class="course-form" method="post" action="/courses">
           <label>
             Название
-            <input name="title" value="${escapeHtml(draft.title)}" placeholder="Например: Основы SQL за 10 шагов" ${telegramConnected ? '' : 'disabled'} />
+            <input name="title" value="${escapeHtml(draft.title)}" placeholder="Например: Основы SQL за 10 шагов" />
           </label>
           <label>
             Описание
-            <textarea name="description" rows="3" placeholder="Коротко о результате курса" ${telegramConnected ? '' : 'disabled'}>${escapeHtml(draft.description)}</textarea>
+            <textarea name="description" rows="3" placeholder="Коротко о результате курса">${escapeHtml(draft.description)}</textarea>
           </label>
           <fieldset>
             <legend>Видимость</legend>
             <label class="radio-row">
-              <input type="radio" name="visibility" value="public" ${draft.visibility === 'public' ? 'checked' : ''} ${telegramConnected ? '' : 'disabled'} />
+              <input type="radio" name="visibility" value="public" ${draft.visibility === 'public' ? 'checked' : ''} />
               Опубликовать в маркетплейсе
             </label>
             <label class="radio-row">
-              <input type="radio" name="visibility" value="private" ${draft.visibility === 'private' ? 'checked' : ''} ${telegramConnected ? '' : 'disabled'} />
+              <input type="radio" name="visibility" value="private" ${draft.visibility === 'private' ? 'checked' : ''} />
               Оставить приватным
             </label>
           </fieldset>
           <label>
             Шаги
-            <textarea name="stepsText" rows="14" placeholder="Шаг 1: Введение&#10;Короткий текст первого шага.&#10;&#10;Шаг 2: Практика&#10;Что нужно сделать." ${telegramConnected ? '' : 'disabled'}>${escapeHtml(draft.stepsText)}</textarea>
+            <textarea name="stepsText" rows="14" placeholder="Шаг 1: Введение&#10;Короткий текст первого шага.&#10;&#10;Шаг 2: Практика&#10;Что нужно сделать.">${escapeHtml(draft.stepsText)}</textarea>
           </label>
-          <button type="submit" ${telegramConnected ? '' : 'disabled'}>Создать курс</button>
+          <button type="submit">Создать курс</button>
         </form>
       </section>
       ${telegramNotice}
@@ -2329,7 +2320,7 @@ const authErrorLabel = (code: string) => {
     google_auth_failed: 'Не удалось войти через Google.',
     telegram_auth_failed: 'Не удалось войти через Telegram.',
     account_already_linked: 'Этот внешний аккаунт уже привязан к другому пользователю.',
-    telegram_required: 'Подключите Telegram, чтобы создавать и запускать курсы.',
+    telegram_required: 'Подключите Telegram, чтобы запускать курсы.',
   };
   return labels[code] ?? 'Не удалось выполнить вход.';
 };

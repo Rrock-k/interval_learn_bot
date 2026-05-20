@@ -184,7 +184,7 @@ export interface ReminderQueueItem {
 
 export interface CourseRecord {
   id: string;
-  ownerUserId: string;
+  ownerUserId: string | null;
   ownerAppUserId: string | null;
   title: string;
   description: string | null;
@@ -1386,7 +1386,7 @@ export class CardStore {
 
   async createCourse(input: {
     id?: string;
-    ownerUserId: string;
+    ownerUserId?: string | null;
     ownerAppUserId?: string | null;
     title: string;
     description?: string | null;
@@ -1416,7 +1416,7 @@ export class CardStore {
     `,
       [
         input.id ?? uuid(),
-        input.ownerUserId,
+        input.ownerUserId ?? null,
         input.ownerAppUserId ?? null,
         input.title.trim(),
         input.description?.trim() || null,
@@ -1611,7 +1611,7 @@ export class CardStore {
   }
 
   async createCourseWithSteps(input: {
-    ownerUserId: string;
+    ownerUserId?: string | null;
     ownerAppUserId?: string | null;
     title: string;
     description?: string | null;
@@ -1649,7 +1649,7 @@ export class CardStore {
       `,
         [
           uuid(),
-          input.ownerUserId,
+          input.ownerUserId ?? null,
           input.ownerAppUserId ?? null,
           input.title.trim(),
           input.description?.trim() || null,
