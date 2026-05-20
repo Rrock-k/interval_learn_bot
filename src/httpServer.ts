@@ -472,6 +472,24 @@ export const createHttpServer = (
           return;
         }
 
+        const courseAdvance = await withDbRetry(() =>
+          store.completeCourseStepFromQueue({
+            cardId: card.id,
+            jobId: job?.id ?? null,
+          }),
+        );
+        if (courseAdvance) {
+          res.json({
+            ok: true,
+            data: {
+              action: 'course_step_viewed',
+              card,
+              course: courseAdvance,
+            },
+          });
+          return;
+        }
+
         const result = computeReview(card, 'ok');
         await withDbRetry(() =>
           store.saveReviewResult({

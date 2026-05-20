@@ -1,4 +1,4 @@
-import { pgTable, text, integer, index, check, serial } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, index, check, serial, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable(
@@ -116,6 +116,107 @@ export const unrecognizedSchedules = pgTable('unrecognized_schedules', {
   input: text('input').notNull(),
   createdAt: text('created_at').notNull(),
 });
+
+export const courses = pgTable(
+  'courses',
+  {
+    id: text('id').primaryKey(),
+    ownerUserId: text('owner_user_id').notNull(),
+    title: text('title').notNull(),
+    description: text('description'),
+    status: text('status').notNull().default('draft'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_courses_owner_status').on(table.ownerUserId, table.status),
+    check(
+      'courses_status_check',
+      sql`${table.status} IN ('draft', 'active', 'archived')`,
+    ),
+  ],
+);
+
+export const courseSteps = pgTable(
+  'course_steps',
+  {
+    id: text('id').primaryKey(),
+    courseId: text('course_id').notNull().references(() => courses.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    kind: text('kind').notNull().default('material'),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_course_steps_course_position').on(table.courseId, table.position),
+    check(
+      'course_steps_kind_check',
+      sql`${table.kind} IN ('material', 'practice', 'question')`,
+    ),
+  ],
+);
+
+export const courseEnrollments = pgTable(
+  'course_enrollments',
+  {
+    id: text('id').primaryKey(),
+    courseId: text('course_id').notNull().references(() => courses.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
+    queueScopeType: text('queue_scope_type').notNull().default('user'),
+    queueScopeId: text('queue_scope_id').notNull(),
+    status: text('status').notNull().default('active'),
+    cadence: text('cadence').notNull().default('after_view'),
+    nextStepPosition: integer('next_step_position').notNull().default(1),
+    startedAt: text('started_at').notNull(),
+    completedAt: text('completed_at'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_course_enrollments_scope_status').on(
+      table.queueScopeType,
+      table.queueScopeId,
+      table.status,
+    ),
+    check(
+      'course_enrollments_status_check',
+      sql`${table.status} IN ('active', 'completed', 'paused', 'archived')`,
+    ),
+    check(
+      'course_enrollments_cadence_check',
+      sql`${table.cadence} IN ('after_view', 'daily')`,
+    ),
+    check(
+      'course_enrollments_queue_scope_type_check',
+      sql`${table.queueScopeType} IN ('user', 'chat')`,
+    ),
+  ],
+);
+
+export const courseStepDeliveries = pgTable(
+  'course_step_deliveries',
+  {
+    id: text('id').primaryKey(),
+    enrollmentId: text('enrollment_id').notNull().references(() => courseEnrollments.id, { onDelete: 'cascade' }),
+    stepId: text('step_id').notNull().references(() => courseSteps.id, { onDelete: 'cascade' }),
+    cardId: text('card_id').references(() => cards.id, { onDelete: 'set null' }),
+    status: text('status').notNull().default('queued'),
+    releasedAt: text('released_at').notNull(),
+    viewedAt: text('viewed_at'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('idx_course_step_deliveries_enrollment_step').on(table.enrollmentId, table.stepId),
+    index('idx_course_step_deliveries_card_status').on(table.cardId, table.status),
+    check(
+      'course_step_deliveries_status_check',
+      sql`${table.status} IN ('queued', 'viewed', 'skipped')`,
+    ),
+  ],
+);
 
 export const reminderJobs = pgTable(
   'reminder_jobs',

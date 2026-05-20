@@ -1,4 +1,4 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import { v4 as uuid } from 'uuid';
 import { withDbRetry } from './utils/dbRetry';
 import {
@@ -11,6 +11,7 @@ import {
   ReminderRebalancePreviewChange,
   buildReminderRebalancePreview,
 } from './reminderRebalance';
+import { buildCourseStepCardText, CourseStepKind } from './courses';
 
 export type CardStatus = 'pending' | 'learning' | 'awaiting_grade' | 'archived';
 export type BacklogItemStatus = 'open' | 'done' | 'archived';
@@ -25,6 +26,9 @@ export type ReminderJobStatus =
   | 'cancelled'
   | 'failed';
 export type QueueScopeType = 'user' | 'chat';
+export type CourseStatus = 'draft' | 'active' | 'archived';
+export type CourseEnrollmentStatus = 'active' | 'completed' | 'paused' | 'archived';
+export type CourseCadence = 'after_view' | 'daily';
 
 export interface QueueScope {
   type: QueueScopeType;
@@ -175,6 +179,69 @@ export interface ReminderQueueItem {
   isDue: boolean;
 }
 
+export interface CourseRecord {
+  id: string;
+  ownerUserId: string;
+  title: string;
+  description: string | null;
+  status: CourseStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CourseStepRecord {
+  id: string;
+  courseId: string;
+  position: number;
+  kind: CourseStepKind;
+  title: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CourseEnrollmentRecord {
+  id: string;
+  courseId: string;
+  userId: string;
+  queueScopeType: QueueScopeType;
+  queueScopeId: string;
+  status: CourseEnrollmentStatus;
+  cadence: CourseCadence;
+  nextStepPosition: number;
+  startedAt: string;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CourseStepDeliveryRecord {
+  id: string;
+  enrollmentId: string;
+  stepId: string;
+  cardId: string | null;
+  status: 'queued' | 'viewed' | 'skipped';
+  releasedAt: string;
+  viewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CourseStepReleaseResult {
+  enrollment: CourseEnrollmentRecord;
+  step: CourseStepRecord | null;
+  card: CardRecord | null;
+  delivery: CourseStepDeliveryRecord | null;
+  completed: boolean;
+}
+
+export interface CourseAdvanceResult {
+  enrollment: CourseEnrollmentRecord;
+  viewedDelivery: CourseStepDeliveryRecord;
+  next: CourseStepReleaseResult | null;
+  completed: boolean;
+}
+
 export interface CreateReminderJobInput {
   cardId: string;
   userId: string;
@@ -307,6 +374,54 @@ const rowToReminderJob = (row: any): ReminderJobRecord => ({
   snoozedFromJobId: row.snoozed_from_job_id,
   error: row.error,
   metadata: row.metadata,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToCourse = (row: any): CourseRecord => ({
+  id: row.id,
+  ownerUserId: row.owner_user_id,
+  title: row.title,
+  description: row.description ?? null,
+  status: row.status as CourseStatus,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToCourseStep = (row: any): CourseStepRecord => ({
+  id: row.id,
+  courseId: row.course_id,
+  position: Number(row.position),
+  kind: row.kind as CourseStepKind,
+  title: row.title,
+  body: row.body,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToCourseEnrollment = (row: any): CourseEnrollmentRecord => ({
+  id: row.id,
+  courseId: row.course_id,
+  userId: row.user_id,
+  queueScopeType: normalizeQueueScopeType(row.queue_scope_type),
+  queueScopeId: row.queue_scope_id ?? row.user_id,
+  status: row.status as CourseEnrollmentStatus,
+  cadence: row.cadence as CourseCadence,
+  nextStepPosition: Number(row.next_step_position),
+  startedAt: row.started_at,
+  completedAt: row.completed_at ?? null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToCourseStepDelivery = (row: any): CourseStepDeliveryRecord => ({
+  id: row.id,
+  enrollmentId: row.enrollment_id,
+  stepId: row.step_id,
+  cardId: row.card_id ?? null,
+  status: row.status,
+  releasedAt: row.released_at,
+  viewedAt: row.viewed_at ?? null,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -715,6 +830,357 @@ export class CardStore {
       type: normalizeQueueScopeType(row.queue_scope_type),
       id: row.queue_scope_id ?? row.user_id ?? fallbackUserId,
     };
+  }
+
+  private async releaseCourseStepForEnrollment(
+    client: PoolClient,
+    enrollmentId: string,
+    releasedAt: string,
+  ): Promise<CourseStepReleaseResult> {
+    const { rows: enrollmentRows } = await client.query(
+      `
+      SELECT *
+      FROM course_enrollments
+      WHERE id = $1
+      FOR UPDATE
+    `,
+      [enrollmentId],
+    );
+    if (!enrollmentRows.length) {
+      throw new Error(`Course enrollment ${enrollmentId} not found`);
+    }
+
+    let enrollment = rowToCourseEnrollment(enrollmentRows[0]);
+    if (enrollment.status !== 'active') {
+      return {
+        enrollment,
+        step: null,
+        card: null,
+        delivery: null,
+        completed: enrollment.status === 'completed',
+      };
+    }
+
+    const { rows: stepRows } = await client.query(
+      `
+      SELECT course_steps.*,
+             courses.title AS course_title,
+             (
+               SELECT COUNT(*)
+               FROM course_steps all_steps
+               WHERE all_steps.course_id = course_steps.course_id
+             ) AS total_steps
+      FROM course_steps
+      JOIN courses ON courses.id = course_steps.course_id
+      WHERE course_steps.course_id = $1
+        AND course_steps.position = $2
+    `,
+      [enrollment.courseId, enrollment.nextStepPosition],
+    );
+
+    if (!stepRows.length) {
+      const { rows: completedRows } = await client.query(
+        `
+        UPDATE course_enrollments
+        SET status = 'completed',
+            completed_at = $1,
+            updated_at = $1
+        WHERE id = $2
+        RETURNING *
+      `,
+        [releasedAt, enrollment.id],
+      );
+      enrollment = rowToCourseEnrollment(completedRows[0]);
+      return {
+        enrollment,
+        step: null,
+        card: null,
+        delivery: null,
+        completed: true,
+      };
+    }
+
+    const step = rowToCourseStep(stepRows[0]);
+    const totalSteps = Number(stepRows[0].total_steps);
+    const dueAt =
+      enrollment.cadence === 'daily' && step.position > 1
+        ? new Date(Date.parse(releasedAt) + 24 * 60 * 60_000).toISOString()
+        : releasedAt;
+    const cardText = buildCourseStepCardText({
+      courseTitle: stepRows[0].course_title,
+      stepPosition: step.position,
+      totalSteps,
+      stepKind: step.kind,
+      stepTitle: step.title,
+      body: step.body,
+    });
+    const cardId = uuid();
+    const { rows: cardRows } = await client.query(
+      `
+      INSERT INTO cards (
+        id, user_id, queue_scope_type, queue_scope_id,
+        source_chat_id, source_message_id, source_message_ids,
+        content_type, content_preview, content_file_id, content_file_unique_id,
+        reminder_mode, schedule_rule, status,
+        repetition, next_review_at, last_reviewed_at,
+        pending_channel_id, pending_channel_message_id, base_channel_message_id,
+        awaiting_grade_since, last_notification_at, last_notification_reason,
+        last_notification_message_id, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4,
+        $5, 0, NULL,
+        'text', $6, NULL, NULL,
+        'schedule', NULL, 'learning',
+        0, $7, NULL,
+        NULL, NULL, NULL,
+        NULL, NULL, NULL,
+        NULL, $8, $8
+      )
+      RETURNING *
+    `,
+      [
+        cardId,
+        enrollment.userId,
+        enrollment.queueScopeType,
+        enrollment.queueScopeId,
+        enrollment.queueScopeType === 'chat' ? enrollment.queueScopeId : enrollment.userId,
+        cardText,
+        dueAt,
+        releasedAt,
+      ],
+    );
+    const card = rowToCard(cardRows[0]);
+    const { rows: deliveryRows } = await client.query(
+      `
+      INSERT INTO course_step_deliveries (
+        id, enrollment_id, step_id, card_id, status,
+        released_at, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, 'queued',
+        $5, $5, $5
+      )
+      RETURNING *
+    `,
+      [uuid(), enrollment.id, step.id, card.id, releasedAt],
+    );
+    const delivery = rowToCourseStepDelivery(deliveryRows[0]);
+    const { rows: updatedEnrollmentRows } = await client.query(
+      `
+      UPDATE course_enrollments
+      SET next_step_position = $1,
+          updated_at = $2
+      WHERE id = $3
+      RETURNING *
+    `,
+      [step.position + 1, releasedAt, enrollment.id],
+    );
+    enrollment = rowToCourseEnrollment(updatedEnrollmentRows[0]);
+
+    return {
+      enrollment,
+      step,
+      card,
+      delivery,
+      completed: false,
+    };
+  }
+
+  async createCourse(input: {
+    id?: string;
+    ownerUserId: string;
+    title: string;
+    description?: string | null;
+    status?: CourseStatus;
+  }): Promise<CourseRecord> {
+    const now = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO courses (
+        id, owner_user_id, title, description, status, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $6
+      )
+      RETURNING *
+    `,
+      [
+        input.id ?? uuid(),
+        input.ownerUserId,
+        input.title.trim(),
+        input.description?.trim() || null,
+        input.status ?? 'draft',
+        now,
+      ],
+    );
+    return rowToCourse(rows[0]);
+  }
+
+  async createCourseStep(input: {
+    id?: string;
+    courseId: string;
+    position: number;
+    kind?: CourseStepKind;
+    title: string;
+    body: string;
+  }): Promise<CourseStepRecord> {
+    const now = new Date().toISOString();
+    const { rows } = await this.pool.query(
+      `
+      INSERT INTO course_steps (
+        id, course_id, position, kind, title, body, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $7
+      )
+      RETURNING *
+    `,
+      [
+        input.id ?? uuid(),
+        input.courseId,
+        input.position,
+        input.kind ?? 'material',
+        input.title.trim(),
+        input.body.trim(),
+        now,
+      ],
+    );
+    return rowToCourseStep(rows[0]);
+  }
+
+  async startCourseEnrollment(input: {
+    id?: string;
+    courseId: string;
+    userId: string;
+    queueScope?: QueueScope;
+    cadence?: CourseCadence;
+  }): Promise<CourseStepReleaseResult> {
+    const client = await this.pool.connect();
+    const now = new Date().toISOString();
+    const queueScope = input.queueScope ?? buildUserQueueScope(input.userId);
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `
+        INSERT INTO course_enrollments (
+          id, course_id, user_id, queue_scope_type, queue_scope_id,
+          status, cadence, next_step_position, started_at,
+          created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          'active', $6, 1, $7,
+          $7, $7
+        )
+        RETURNING *
+      `,
+        [
+          input.id ?? uuid(),
+          input.courseId,
+          input.userId,
+          queueScope.type,
+          queueScope.id,
+          input.cadence ?? 'after_view',
+          now,
+        ],
+      );
+      const enrollment = rowToCourseEnrollment(rows[0]);
+      const release = await this.releaseCourseStepForEnrollment(client, enrollment.id, now);
+      await client.query('COMMIT');
+      return release;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeCourseStepFromQueue(input: {
+    cardId: string;
+    jobId?: string | null;
+  }): Promise<CourseAdvanceResult | null> {
+    const client = await this.pool.connect();
+    const now = new Date().toISOString();
+    try {
+      await client.query('BEGIN');
+      const { rows: deliveryRows } = await client.query(
+        `
+        SELECT course_step_deliveries.*
+        FROM course_step_deliveries
+        JOIN course_enrollments
+          ON course_enrollments.id = course_step_deliveries.enrollment_id
+        WHERE course_step_deliveries.card_id = $1
+          AND course_step_deliveries.status = 'queued'
+          AND course_enrollments.status = 'active'
+        FOR UPDATE OF course_step_deliveries, course_enrollments
+      `,
+        [input.cardId],
+      );
+
+      if (!deliveryRows.length) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      await client.query(
+        `
+        UPDATE reminder_jobs
+        SET status = 'completed',
+            completed_at = $1,
+            updated_at = $1
+        WHERE card_id = $2
+          AND status IN ('pending', 'sending', 'awaiting_action')
+      `,
+        [now, input.cardId],
+      );
+      if (input.jobId) {
+        await client.query(
+          `
+          UPDATE reminder_jobs
+          SET status = 'completed',
+              completed_at = $1,
+              updated_at = $1
+          WHERE id = $2
+        `,
+          [now, input.jobId],
+        );
+      }
+      await client.query(
+        `
+        UPDATE cards
+        SET status = 'archived',
+            updated_at = $1
+        WHERE id = $2
+      `,
+        [now, input.cardId],
+      );
+      const { rows: viewedRows } = await client.query(
+        `
+        UPDATE course_step_deliveries
+        SET status = 'viewed',
+            viewed_at = $1,
+            updated_at = $1
+        WHERE id = $2
+        RETURNING *
+      `,
+        [now, deliveryRows[0].id],
+      );
+      const viewedDelivery = rowToCourseStepDelivery(viewedRows[0]);
+      const next = await this.releaseCourseStepForEnrollment(
+        client,
+        viewedDelivery.enrollmentId,
+        now,
+      );
+      await client.query('COMMIT');
+      return {
+        enrollment: next.enrollment,
+        viewedDelivery,
+        next,
+        completed: next.completed,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async createReminderJob(input: CreateReminderJobInput): Promise<ReminderJobRecord> {
